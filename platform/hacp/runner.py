@@ -352,7 +352,11 @@ class ExperimentRunner:
                 exp = self.store.get_experiment(exp_id)
                 if exp is None:
                     return
-                bstate = self.store.budget_state(exp)
+                # Include in-flight reservations: a burst of concurrent calls
+                # still trips the pause even before completions land in the ledger
+                from .budget import combined_budget_state
+
+                bstate = combined_budget_state(self.store, exp)
                 if bstate["exceeded"]:
                     self.bus.publish(
                         exp_id, "budget_exceeded",
@@ -384,11 +388,20 @@ class ExperimentRunner:
                 return
             if exp["status"] != "running":
                 return  # stop()/budget already finalized
-            bstate = self.store.budget_state(exp)
+            from .budget import combined_budget_state
+
+            bstate = combined_budget_state(self.store, exp)
             if bstate["exceeded"]:
                 self._finalize(
                     exp_id, "paused_budget",
                     reason=f"budget exceeded ({bstate['exceeded_reason']}) at loop exit",
+                )
+            elif proc_rc == 2 and cfg.loop == "stub":
+                # stub-loop convention: exit code 2 = the proxy refused service
+                # for budget reasons (429 hacp_budget_exhausted)
+                self._finalize(
+                    exp_id, "paused_budget",
+                    reason="budget exhausted: LLM access refused by platform proxy",
                 )
             else:
                 self._finalize(

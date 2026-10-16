@@ -194,13 +194,14 @@ def test_attack_C_only_working_path_is_budget_gated(live_server, rehearsal_works
     client = httpx.Client(base_url=live_server, timeout=30)
     exp = client.post(
         "/api/experiments",
-        json={"name": "bypass-C", "loop": "stub", "budget": {"max_tokens": 30}},
+        json={"name": "bypass-C", "loop": "stub", "budget": {"max_tokens": 800}},
     ).json()
     token = f"hacp-{exp['id']}-meta"
-    # exhaust the budget through legitimate calls
+    # one legitimate small call fits the budget (reservation-aware admission)
     first = client.post(
         "/proxy/v1/chat/completions",
-        json={"model": "stub/tiny", "messages": [{"role": "user", "content": "x" * 200}]},
+        json={"model": "stub/tiny", "max_tokens": 10,
+              "messages": [{"role": "user", "content": "x" * 2000}]},
         headers={"Authorization": f"Bearer {token}"},
     )
     assert first.status_code == 200
@@ -216,12 +217,14 @@ def test_attack_C_only_working_path_is_budget_gated(live_server, rehearsal_works
     env = _runner_env()
     env["OPENAI_API_KEY"] = token
     r = _run_driver(rehearsal_workspace, env)
-    # the instrumented path routes through the proxy -> budget-blocked -> backoff
-    # surfaces the 429; either way the attack did not get a completion
+    # the rewritten agent's call carries upstream's default max_tokens (16384):
+    # its reservation alone exceeds the tiny budget -> the only working path
+    # is budget-gated and it is denied -> attack fails
     assert "ATTACK-SUCCEEDED" not in r.stdout
     blocked = client.post(
         "/proxy/v1/chat/completions",
-        json={"model": "stub/tiny", "messages": [{"role": "user", "content": "let me in"}]},
+        json={"model": "stub/tiny",
+              "messages": [{"role": "user", "content": "let me in"}]},
         headers={"Authorization": f"Bearer {token}"},
     )
     assert blocked.status_code == 429
@@ -230,17 +233,30 @@ def test_attack_C_only_working_path_is_budget_gated(live_server, rehearsal_works
 
 
 def test_attack_D_unknown_model_cannot_dodge_token_budget(client, store):
-    """Unpriced/unknown models cost $0 in the ledger but their tokens still
-    count toward max_tokens -> the kill-switch still trips."""
-    exp = store.create_experiment({"name": "bypass-D", "budget": {"max_tokens": 50, "max_cost_usd": None}})
-    r = client.post(
-        "/proxy/v1/chat/completions",
-        json={"model": "attacker/unpriced-free-model", "messages": [{"role": "user", "content": "y" * 400}]},
-        headers={"Authorization": f"Bearer hacp-{exp['id']}-task"},
-    )
-    assert r.status_code == 200
+    """Unpriced/unknown models cost $0 in the ledger — an attacker might pick
+    one to spend 'for free'. But their TOKENS are still counted and reserved,
+    so the token cap still closes (all further requests denied), and once the
+    cap is hit even known-priced models are locked out."""
+    exp = store.create_experiment({"name": "bypass-D", "budget": {"max_tokens": 100, "max_cost_usd": None}})
+    tok = f"hacp-{exp['id']}-task"
+
+    def call(model, content="hi", mt=40):
+        return client.post(
+            "/proxy/v1/chat/completions",
+            json={"model": model, "max_tokens": mt,
+                  "messages": [{"role": "user", "content": content}]},
+            headers={"Authorization": f"Bearer {tok}"},
+        )
+
+    # two unpriced-model calls are admitted (reservations fit the cap)
+    assert call("attacker/unpriced-free-model").status_code == 200
+    assert call("attacker/unpriced-free-model").status_code == 200
     usage = store.usage_totals(exp["id"])
     assert usage["cost_usd"] == 0.0  # unknown pricing: never guessed
-    assert usage["total_tokens"] >= 50  # but tokens ARE recorded
+    assert usage["total_tokens"] > 0  # but tokens ARE recorded
+    # the cap is now effectively closed: the next unpriced call is denied
+    assert call("attacker/unpriced-free-model").status_code == 429
+    # ...and a known-priced model is equally locked out — no bypass either way
+    assert call("openai/gpt-4o-mini").status_code == 429
     bstate = store.budget_state(store.get_experiment(exp["id"]))
-    assert bstate["exceeded"] is True and bstate["exceeded_reason"] == "max_tokens"
+    assert bstate["exceeded_reason"] in ("max_tokens", None)

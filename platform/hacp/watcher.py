@@ -70,8 +70,14 @@ class ExperimentWatcher(threading.Thread):
         while not self._stop.wait(self.interval):
             try:
                 self.poll_once()
-            except Exception as e:  # never die on transient fs states
-                self.store.add_event(self.exp_id, "watcher_error", {"error": str(e)})
+            except Exception:
+                # never die on transient fs states; if the store is closed (app
+                # shutdown), stop polling entirely
+                try:
+                    self.store.add_event(self.exp_id, "watcher_error", {})
+                except Exception:
+                    self._stop.set()
+                    return
 
     # -- tailing ------------------------------------------------------------------
     def _tail(self, path: Path, max_lines: int = 50) -> list[str]:

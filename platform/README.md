@@ -112,15 +112,52 @@ platform venv, which therefore also needs: `matplotlib networkx scipy
 hydra-core GitPython numpy pandas` (+ system `graphviz` and pip `pygraphviz`
 for archive visualizations). See `platform/requirements.txt`.
 
+### Budget enforcement & concurrency (in-flight overspend)
+
+Budgets are enforced server-side by the proxy with **reservations**, making
+admission atomic across concurrent requests (upstream evaluates with a thread
+pool; without reservations N in-flight calls could all pass the check):
+
+1. Before forwarding, the proxy reserves a conservative estimate
+   (1.5× prompt estimate + requested `max_tokens`, default 16384).
+2. A request is admitted only if `committed + reserved` stays within limits.
+3. On completion the actual usage is recorded (authoritative) and the
+   reservation released; reservations expire after 10 minutes (safety valve).
+
+**Worst-case overshoot** is bounded by the reservations admitted at the
+moment the cap is crossed: each actual usage ≤ its reservation × tokenizer
+error factor (the 1.5× prompt factor covers observed tokenizer variance;
+completion is hard-capped by `max_tokens`). In pathological cases overshoot is
+at most one request's worth of slack — never N requests. The runner's pause
+loop counts reservations too, so an experiment pauses *before* a burst lands.
+
+Additional rules:
+- **Unknown model pricing cannot bypass a dollar limit**: models absent from
+  the pricing registry are refused (403 `hacp_unknown_pricing`) when a dollar
+  budget is configured; token-only budgets remain safe (tokens always count).
+- Budgets are **cumulative per experiment** across seeds, runs and resumes.
+- Per-generation cost attribution: `GET /api/experiments/{id}/cost_report`
+  (phase/generation windows from upstream's own generation boundaries) and
+  live via SSE `llm_call` events (role, model, tokens, latency, generation).
+
+### Provider verification (nonbillable)
+
+`POST /api/admin/verify-provider` uses only OpenRouter's free endpoints
+(`/key`, `/models`) — zero completion tokens, zero cost. It validates the key,
+confirms both configured models exist as OpenRouter slugs, and cross-checks
+live pricing against the platform registry. The key is never returned.
+
 ### Operational notes
 
 - Experiment containers write into the bind-mounted workspace as **root**;
   rebuilding a workspace afterwards may need `sudo rm -rf` (upstream's
   `git clean` removes most residue at each generation boundary).
-- Budgets are **cumulative per experiment** across seeds, runs and resumes —
-  enforced server-side by the proxy (see `tests/test_bypass_resistance.py`).
 - Resuming a `finished` experiment (after raising `max_generation`) continues
   the same lineage via upstream `--resume_from`.
+- The OpenRouter key may be provided via the process environment
+  (`OPENROUTER_API_KEY`) or `platform-home/secrets.env` (gitignored); either
+  way it stays in the platform process and is stripped from all experiment
+  subprocesses and containers.
 
 ## Tests (offline, no API charges)
 

@@ -68,9 +68,13 @@ def main():
 
     if args.resume_from:
         out_dir = Path(args.resume_from)
-        archive = json.loads(
-            [ln for ln in (out_dir / "archive.jsonl").read_text().splitlines() if ln.strip()][-1]
-        )["archive"]
+        archive_file = out_dir / "archive.jsonl"
+        if archive_file.exists():
+            archive = json.loads(
+                [ln for ln in archive_file.read_text().splitlines() if ln.strip()][-1]
+            )["archive"]
+        else:
+            archive = []  # interrupted before the first generation completed
     else:
         out_dir = ws / "outputs" / f"generate_{args.run_id}"
         out_dir.mkdir(parents=True, exist_ok=True)

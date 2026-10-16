@@ -88,7 +88,8 @@ class Store:
                 cost_usd REAL DEFAULT 0,
                 latency_s REAL,
                 status TEXT DEFAULT 'ok',
-                source TEXT DEFAULT 'proxy'
+                source TEXT DEFAULT 'proxy',
+                generation TEXT
             )"""
         )
         cur.execute(
@@ -104,6 +105,15 @@ class Store:
             "CREATE INDEX IF NOT EXISTS idx_usage_exp ON usage(experiment_id, id)"
         )
         self._conn.commit()
+        self._migrate()
+
+    def _migrate(self):
+        """In-place schema migrations for databases created by older versions."""
+        with self._lock:
+            cols = {r[1] for r in self._conn.execute("PRAGMA table_info(usage)")}
+            if "generation" not in cols:
+                self._conn.execute("ALTER TABLE usage ADD COLUMN generation TEXT")
+            self._conn.commit()
 
     # -- helpers -----------------------------------------------------------
     @staticmethod
@@ -224,6 +234,7 @@ class Store:
         status: str = "ok",
         source: str = "proxy",
         ts: float | None = None,
+        generation: Optional[str] = None,
     ) -> dict:
         total = total_tokens if total_tokens is not None else (prompt_tokens + completion_tokens)
         if cost_usd is None:
@@ -240,15 +251,16 @@ class Store:
             "latency_s": latency_s,
             "status": status,
             "source": source,
+            "generation": generation,
         }
         with self._lock:
             self._conn.execute(
                 """INSERT INTO usage
                    (experiment_id, ts, role, model, prompt_tokens, completion_tokens,
-                    total_tokens, cost_usd, latency_s, status, source)
+                    total_tokens, cost_usd, latency_s, status, source, generation)
                    VALUES (:experiment_id, :ts, :role, :model, :prompt_tokens,
                            :completion_tokens, :total_tokens, :cost_usd, :latency_s,
-                           :status, :source)""",
+                           :status, :source, :generation)""",
                 row,
             )
             self._conn.commit()
@@ -260,7 +272,9 @@ class Store:
         q = (
             "SELECT COALESCE(SUM(prompt_tokens),0) p, COALESCE(SUM(completion_tokens),0) c, "
             "COALESCE(SUM(total_tokens),0) t, COALESCE(SUM(cost_usd),0) cost, COUNT(*) n, "
-            "AVG(latency_s) avg_latency "
+            "AVG(latency_s) avg_latency, "
+            "SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) errors, "
+            "SUM(CASE WHEN status='blocked' THEN 1 ELSE 0 END) blocked "
             "FROM usage WHERE status='ok'"
         )
         params: list[Any] = []
@@ -271,6 +285,17 @@ class Store:
         params.append(source)
         with self._lock:
             r = self._conn.execute(q, params).fetchone()
+        err_q = (
+            "SELECT SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) e, "
+            "SUM(CASE WHEN status='blocked' THEN 1 ELSE 0 END) b "
+            "FROM usage WHERE source=?"
+        )
+        err_params: list[Any] = [source]
+        if experiment_id is not None:
+            err_q += " AND experiment_id=?"
+            err_params.append(experiment_id)
+        with self._lock:
+            er = self._conn.execute(err_q, err_params).fetchone()
         return {
             "prompt_tokens": r["p"],
             "completion_tokens": r["c"],
@@ -278,8 +303,21 @@ class Store:
             "cost_usd": round(r["cost"], 6),
             "requests": r["n"],
             "avg_latency_s": round(r["avg_latency"], 4) if r["avg_latency"] is not None else None,
+            "errors": er["e"] or 0,
+            "blocked": er["b"] or 0,
             "source": source,
         }
+
+    def list_usage(self, experiment_id: str, source: str = "proxy") -> list[dict]:
+        """Raw usage rows (for cost attribution by time windows)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT ts, role, model, prompt_tokens, completion_tokens, "
+                "total_tokens, cost_usd, latency_s, status, generation "
+                "FROM usage WHERE experiment_id=? AND source=? ORDER BY ts",
+                (experiment_id, source),
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     def usage_breakdown(self, experiment_id: Optional[str], source: str = "proxy") -> list[dict]:
         q = (

@@ -247,6 +247,7 @@ function renderMetrics(e, genStats) {
   const dur = e.started_at && e.finished_at
     ? `${((e.finished_at - e.started_at) / 60).toFixed(1)} min`
     : e.started_at ? `${((Date.now() / 1000 - e.started_at) / 60).toFixed(1)} min` : "—";
+  const errs = u.errors != null ? u.errors : 0;
   $("#metrics").innerHTML = `
     <div class="metric"><div class="label">Status</div><div class="value"><span class="status-chip st-${e.status}">${e.status}</span></div></div>
     <div class="metric"><div class="label">Current generation</div><div class="value">${e.current_gen ?? "—"}</div></div>
@@ -255,7 +256,8 @@ function renderMetrics(e, genStats) {
     <div class="metric"><div class="label">LLM calls</div><div class="value">${u.requests ?? 0} · ${avgLatency} avg</div></div>
     <div class="metric"><div class="label">Avg gen time</div><div class="value">${avgGen}</div></div>
     <div class="metric"><div class="label">Elapsed</div><div class="value">${dur}</div></div>
-    <div class="metric"><div class="label">Budget</div><div class="value">${b.exceeded ? "EXCEEDED" : (JSON.stringify(b.limits || {}).length > 2 ? "within limits" : "unlimited")}</div></div>`;
+    <div class="metric"><div class="label">Budget</div><div class="value">${b.exceeded ? "EXCEEDED" : (JSON.stringify(b.limits || {}).length > 2 ? "within limits" : "unlimited")}</div></div>
+    <div class="metric"><div class="label">Errors${errs ? " ⚠" : ""}</div><div class="value">${errs}${u.blocked != null && u.blocked > 0 ? ` · ${u.blocked} blocked` : ""}</div></div>`;
 }
 
 function openSSE(expId) {
@@ -297,13 +299,25 @@ function renderGenerations(gens) {
 
 async function openGenDialog(eid, gen) {
   try {
-    const d = await jfetch(`${API}/experiments/${eid}/generations/${encodeURIComponent(gen)}`);
+    const [d, cost] = await Promise.all([
+      jfetch(`${API}/experiments/${eid}/generations/${encodeURIComponent(gen)}`),
+      jfetch(`${API}/experiments/${eid}/cost_report`).catch(() => null),
+    ]);
     $("#gen-dialog-title").textContent = `Generation ${gen} — history & memory`;
     const scores = Object.entries(d.scores || {}).map(
       ([dom, s]) => `${dom}: train=${fmt.score(s.train)} val=${fmt.score(s.val)}`
     ).join(" · ") || "no scores";
+    let costLine = "";
+    if (cost) {
+      const phase = (cost.phases || []).find((p) => p.phase === `gen ${gen}`);
+      if (phase && phase.totals.requests + phase.totals.errors > 0) {
+        const t = phase.totals;
+        costLine = `<div class="subtle small">this generation: ${fmt.tokens(t.total_tokens)} tokens · ${fmt.money(t.cost_usd)} · ${t.requests} calls · ${t.errors} error${t.errors === 1 ? "" : "s"} · avg ${(t.avg_latency_s * 1000).toFixed(0)}ms</div>`;
+      }
+    }
     $("#gen-dialog-body").innerHTML = `
       <div class="subtle small">parent: ${d.metadata?.parent_genid ?? "—"} | ${scores}</div>
+      ${costLine}
       ${d.model_patch ? `<h4>Meta-agent patch</h4><pre class="code">${escapeHtml(d.model_patch)}</pre>` : ""}
       ${d.meta_chat_history_tail ? `<h4>Meta-agent chat history (tail)</h4><pre class="code">${escapeHtml(d.meta_chat_history_tail)}</pre>` : ""}
       <h4>Files</h4><div class="subtle small">${(d.files || []).join(" · ")}</div>`;

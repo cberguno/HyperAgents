@@ -32,14 +32,22 @@ import httpx
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from .budget import RESERVATIONS, combined_budget_state
 from .config import (
     PROVIDER_KEY_VARS,
     ServiceConfig,
+    estimate_cost,
     normalize_model,
     openrouter_slug,
     resolve_model,
 )
 from .store import Store
+
+# Conservative multiplier on the estimated prompt size for reservations:
+# provider tokenizers can count ~20-30% more tokens than chars/4.
+_RESERVATION_PROMPT_FACTOR = 1.5
+# Assumed completion ceiling when the caller doesn't send max_tokens.
+_RESERVATION_DEFAULT_MAX_TOKENS = 16384
 
 PROVIDER_KEY_VARS  # re-exported for backwards imports (defined in config.py)
 
@@ -122,6 +130,10 @@ class StubUpstream:
                 f"({len(messages)} message(s) received). No real API call was made."
             )
         completion_tokens = len(content) // 4 + 6
+        # respect the caller's completion ceiling like a real provider would
+        _mt = payload.get("max_tokens")
+        if isinstance(_mt, int) and _mt > 0:
+            completion_tokens = min(completion_tokens, _mt)
         body = {
             "id": f"chatcmpl-stub-{int(time.time()*1000)}",
             "object": "chat.completion",
@@ -145,15 +157,39 @@ class StubUpstream:
         return body, 200
 
 
+def _read_openrouter_key() -> str:
+    """Read the OpenRouter key from the process environment or, failing that,
+    from platform-home/secrets.env (KEY=VALUE lines, gitignored, mode 0600).
+    The key NEVER leaves the platform process: it is not logged, not returned
+    by any endpoint, and stripped from all experiment subprocess environments.
+    """
+    import os
+
+    key = os.environ.get("OPENROUTER_API_KEY", "")
+    if key:
+        return key
+    from .paths import platform_home
+
+    secrets = platform_home() / "secrets.env"
+    if secrets.exists():
+        try:
+            for line in secrets.read_text().splitlines():
+                line = line.strip()
+                if line.startswith("OPENROUTER_API_KEY="):
+                    return line.split("=", 1)[1].strip().strip('"').strip("'")
+        except OSError:
+            pass
+    return ""
+
+
 def create_upstream(service: ServiceConfig) -> Upstream:
     if service.upstream == "openrouter":
-        import os
-
-        key = os.environ.get("OPENROUTER_API_KEY", "")
+        key = _read_openrouter_key()
         if not key:
             raise RuntimeError(
-                "HACP_UPSTREAM=openrouter requires OPENROUTER_API_KEY in the "
-                "environment of the platform process. Experiments never see this key."
+                "HACP_UPSTREAM=openrouter requires OPENROUTER_API_KEY (process env "
+                "or platform-home/secrets.env). The key stays in the platform "
+                "process only; experiments never see it."
             )
         return OpenRouterUpstream(key)
     return StubUpstream()
@@ -162,7 +198,26 @@ def create_upstream(service: ServiceConfig) -> Upstream:
 def create_proxy_router(store: Store, bus, service: ServiceConfig) -> APIRouter:
     """Build the /proxy router (OpenAI-compatible, HACP-token authenticated)."""
     router = APIRouter()
-    upstream = create_upstream(service)
+    upstream: Upstream | None = None
+    upstream_error: str | None = None
+    try:
+        upstream = create_upstream(service)
+    except RuntimeError as e:
+        # e.g. HACP_UPSTREAM=openrouter but no key yet: the platform still
+        # starts; requests fail with a clear message until the key arrives.
+        upstream_error = str(e)
+
+    def _get_upstream() -> Upstream:
+        nonlocal upstream, upstream_error
+        if upstream is None:
+            try:
+                upstream = create_upstream(service)
+                upstream_error = None
+            except RuntimeError as e:
+                upstream_error = str(e)
+        if upstream is None:
+            raise HTTPException(503, upstream_error or "LLM upstream unavailable")
+        return upstream
 
     def _auth(authorization: Optional[str]) -> tuple[Optional[str], str]:
         if not authorization or not authorization.startswith("Bearer "):
@@ -183,30 +238,30 @@ def create_proxy_router(store: Store, bus, service: ServiceConfig) -> APIRouter:
         exp_id, role = _auth(authorization)
         payload = await request.json()
         model = normalize_model(payload.get("model", ""))
+        info = resolve_model(model)
 
-        # Server-side model enforcement (optional; default off to preserve
-        # research freedom of the evolving agent).
-        if service.enforce_models and exp_id is not None:
-            exp = store.get_experiment(exp_id)
-            allowed = {
-                "meta": exp["config"].get("meta_model"),
-                "task": exp["config"].get("task_model"),
-            }.get(role)
-            if allowed and model != normalize_model(allowed):
-                return JSONResponse(
-                    status_code=403,
-                    content={"error": {"code": "hacp_model_not_allowed", "message": f"model {model} not allowed for role {role}"}},
-                )
+        # --- admission checks -------------------------------------------------
+        exp = store.get_experiment(exp_id) if exp_id is not None else None
+        limits = (exp or {}).get("config", {}).get("budget", {})
+        has_budget = any(limits.get(k) is not None for k in ("max_cost_usd", "max_tokens", "max_wallclock_hours"))
 
-        # Budget kill-switch (server-side, authoritative).
-        if exp_id is not None:
-            exp = store.get_experiment(exp_id)
-            bstate = store.budget_state(exp)
+        # Unknown pricing cannot bypass a dollar limit: if the experiment has a
+        # budget and this model is not in the pricing registry, refuse it (a
+        # token cap alone is still safe — tokens are always counted).
+        if not info.known_pricing and limits.get("max_cost_usd") is not None:
+            store.add_usage(exp_id, role, model, 0, 0, 0, status="blocked", source="proxy")
+            bus.publish(exp_id, "pricing_blocked", {"model": model, "reason": "unknown pricing with dollar budget"})
+            return JSONResponse(
+                status_code=403,
+                content={"error": {"code": "hacp_unknown_pricing", "message": f"model '{model}' is not in the platform pricing registry; refusing because the experiment has a dollar budget (tokens would be unpriced). Add pricing via HACP_PRICE_OVERRIDES to allow it."}},
+            )
+
+        # Budget admission WITH in-flight reservations (concurrency-safe):
+        bstate = None
+        if exp is not None:
+            bstate = combined_budget_state(store, exp)
             if bstate["exceeded"]:
-                store.add_usage(
-                    exp_id, role, model, 0, 0, 0, cost_usd=0.0,
-                    status="blocked", source="proxy",
-                )
+                store.add_usage(exp_id, role, model, 0, 0, 0, status="blocked", source="proxy")
                 bus.publish(exp_id, "budget_blocked", {"reason": bstate["exceeded_reason"], "model": model})
                 return JSONResponse(
                     status_code=429,
@@ -221,23 +276,80 @@ def create_proxy_router(store: Store, bus, service: ServiceConfig) -> APIRouter:
                     },
                 )
 
+        # Server-side model enforcement (optional; default off to preserve
+        # research freedom of the evolving agent).
+        if service.enforce_models and exp is not None:
+            allowed = {
+                "meta": exp["config"].get("meta_model"),
+                "task": exp["config"].get("task_model"),
+            }.get(role)
+            if allowed and model != normalize_model(allowed):
+                return JSONResponse(
+                    status_code=403,
+                    content={"error": {"code": "hacp_model_not_allowed", "message": f"model {model} not allowed for role {role}"}},
+                )
+
+        # --- reserve conservatively, then forward ----------------------------
+        req_id = None
+        if exp is not None:
+            messages = payload.get("messages", []) or []
+            est_prompt = sum(len(str(m.get("content", ""))) // 4 + 8 for m in messages)
+            est_prompt = int(est_prompt * _RESERVATION_PROMPT_FACTOR)
+            est_completion = min(
+                int(payload.get("max_tokens") or _RESERVATION_DEFAULT_MAX_TOKENS),
+                _RESERVATION_DEFAULT_MAX_TOKENS,
+            )
+            est_tokens = est_prompt + est_completion
+            est_cost = estimate_cost(model, est_prompt, est_completion)
+            # Re-check WITH this reservation (atomic admission under concurrency)
+            committed = store.usage_totals(exp_id)
+            res_tokens, res_cost = RESERVATIONS.totals(exp_id)
+            max_cost = limits.get("max_cost_usd")
+            max_tokens = limits.get("max_tokens")
+            would_exceed = (
+                (max_cost is not None and committed["cost_usd"] + res_cost + est_cost > max_cost)
+                or (max_tokens is not None and committed["total_tokens"] + res_tokens + est_tokens > max_tokens)
+            )
+            if would_exceed:
+                store.add_usage(exp_id, role, model, 0, 0, 0, status="blocked", source="proxy")
+                bus.publish(exp_id, "budget_blocked", {"reason": bstate["exceeded_reason"] or "reservation", "model": model, "reserved_in_flight": res_tokens})
+                return JSONResponse(
+                    status_code=429,
+                    content={
+                        "error": {
+                            "code": "hacp_budget_exhausted",
+                            "message": "Experiment budget would be exceeded by this request (including in-flight reservations).",
+                        }
+                    },
+                )
+            req_id = RESERVATIONS.reserve(exp_id, est_tokens, est_cost)
+
         t0 = time.monotonic()
         try:
-            body, status = await upstream.complete(payload)
+            body, status = await _get_upstream().complete(payload)
         except Exception as e:
+            RESERVATIONS.release(exp_id, req_id)
             store.add_usage(exp_id, role, model, 0, 0, 0, status="error", source="proxy")
             bus.publish(exp_id, "llm_error", {"model": model, "error": str(e)})
             raise HTTPException(502, f"upstream error: {e}")
+        finally:
+            RESERVATIONS.release(exp_id, req_id)
         latency = time.monotonic() - t0
+
+        # Live generation attribution (best-effort; authoritative per-generation
+        # attribution uses completion-time windows — see the cost_report endpoint)
+        generation = None
+        if exp is not None:
+            generation = str(exp["current_gen"]) if exp.get("current_gen") is not None else None
 
         if status == 200 and isinstance(body, dict):
             usage = body.get("usage") or {}
             pt = int(usage.get("prompt_tokens") or 0)
             ct = int(usage.get("completion_tokens") or 0)
-            info = resolve_model(model)
             store.add_usage(
                 exp_id, role, model, pt, ct,
                 latency_s=round(latency, 4), source="proxy",
+                generation=generation,
             )
             bus.publish(
                 exp_id,
@@ -249,12 +361,13 @@ def create_proxy_router(store: Store, bus, service: ServiceConfig) -> APIRouter:
                     "completion_tokens": ct,
                     "latency_s": round(latency, 4),
                     "known_pricing": info.known_pricing,
+                    "generation": generation,
                 },
             )
             if not info.known_pricing:
                 bus.publish(exp_id, "pricing_warning", {"model": model})
             return body
         # upstream error: pass through with error record
-        store.add_usage(exp_id, role, model, 0, 0, 0, status="error", source="proxy")
+        store.add_usage(exp_id, role, model, 0, 0, 0, status="error", source="proxy", generation=generation)
         return JSONResponse(status_code=status, content=body)
     return router

@@ -33,11 +33,20 @@ async function refreshSlots() {
 function renderSlots() {
   const grid = $("#slots");
   grid.innerHTML = "";
+  const makeSlotCard = (el) => {
+    el.tabIndex = 0;
+    el.setAttribute("role", "button");
+    el.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" || ev.key === " ") el.click();
+    });
+    grid.appendChild(el);
+  };
   for (const slot of state.slots) {
     const el = document.createElement("div");
     if (slot.experiment) {
       const e = slot.experiment;
       el.className = "slot";
+      el.setAttribute("aria-label", `Open experiment ${e.name} (${e.id})`);
       el.innerHTML = `
         <h4>${escapeHtml(e.name)}</h4>
         <div class="meta">slot ${slot.position} · <span class="status-chip st-${e.status}">${e.status}</span> · gen ${e.current_gen ?? "—"}/${e.max_generation}</div>
@@ -50,15 +59,17 @@ function renderSlots() {
     } else {
       el.className = "slot empty";
       el.textContent = `Empty slot ${slot.position}`;
+      el.setAttribute("aria-label", `Create experiment in slot ${slot.position}`);
       el.onclick = () => openCreate(slot.position);
     }
-    grid.appendChild(el);
+    makeSlotCard(el);
   }
   const plus = document.createElement("div");
   plus.className = "slot empty";
   plus.textContent = "+ New slot";
+  plus.setAttribute("aria-label", "Add a new experiment slot");
   plus.onclick = async () => { await jfetch(`${API}/slots/expand`, { method: "POST" }); refreshSlots(); };
-  grid.appendChild(plus);
+  makeSlotCard(plus);
 }
 
 function shortModel(m) { return m ? m.split("/").pop().slice(0, 18) : "—"; }

@@ -53,6 +53,9 @@ def test_openrouter_upstream_rewrites_payload_model(monkeypatch):
 def test_openrouter_upstream_requires_key(tmp_path, monkeypatch):
     monkeypatch.setenv("HACP_UPSTREAM", "openrouter")
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    # isolate from any real platform-home/secrets.env on this machine
+    monkeypatch.setenv("HACP_HOME", str(tmp_path))
+    monkeypatch.setattr("hacp.paths.platform_home", lambda home=None: tmp_path)
     service = ServiceConfig(
         host="127.0.0.1", port=1, home=str(tmp_path), upstream="openrouter",
         upstream_repo=".", proxy_public_base="http://x",

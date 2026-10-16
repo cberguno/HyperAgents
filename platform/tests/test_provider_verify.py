@@ -33,6 +33,9 @@ def test_verify_provider_missing_key(tmp_path, monkeypatch):
                             upstream="openrouter", upstream_repo=".",
                             proxy_public_base="http://x")
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    # isolate from any real platform-home/secrets.env on this machine
+    monkeypatch.setenv("HACP_HOME", str(tmp_path))
+    monkeypatch.setattr("hacp.paths.platform_home", lambda home=None: tmp_path)
     c, _ = _make(service)
     r = c.post("/api/admin/verify-provider")
     body = r.json()

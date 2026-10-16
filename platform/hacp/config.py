@@ -50,6 +50,10 @@ _PRICING: dict[str, tuple[str, float, float, str]] = {
     "gemini/gemini-2.5-pro": ("google", 1.25, 10.00, "Gemini 2.5 Pro"),
     "gemini/gemini-2.5-flash": ("google", 0.30, 2.50, "Gemini 2.5 Flash"),
     "gemini/gemini-3-pro-preview": ("google", 2.00, 12.00, "Gemini 3 Pro (preview)"),
+    # --- Zhipu AI (GLM) — prices from OpenRouter /models (2026-10-16) ---
+    "z-ai/glm-5.3": ("z-ai", 0.00, 5.00, "GLM 5.3"),
+    # --- DeepSeek — prices from OpenRouter /models (2026-10-16) ---
+    "deepseek/deepseek-v4.1-flash": ("deepseek", 0.00, 1.00, "DeepSeek v4.1 Flash"),
     # --- Offline stub (never billed) ---
     "stub/tiny": ("stub", 0.0, 0.0, "Offline stub model (no cost)"),
     "stub/task": ("stub", 0.0, 0.0, "Offline stub model (no cost)"),

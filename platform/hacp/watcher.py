@@ -103,11 +103,12 @@ class ExperimentWatcher(threading.Thread):
             for line in self._tail(self.runner_log):
                 self.bus.publish(self.exp_id, "log", {"source": "runner", "line": line[:2000]})
 
-        # 2. Instrumentation usage log (reconciliation source)
-        usage_path = ws / paths.usage_log_relpath()
-        self._poll_local_usage(usage_path)
-
-        # 3. Output directory artifacts
+        # 2. Instrumentation usage logs (reconciliation sources):
+        #    - workspace copy: host-side runs (seed harness) write here
+        #    - snapshot copy: in-container runs (meta agent, in-container evals)
+        #      write under gen_initial/hyperagents/misc/hacp/usage.jsonl because
+        #      the snapshot is what gets bind-mounted at /hyperagents
+        self._poll_local_usage(ws / paths.usage_log_relpath())
         out_root = ws / "outputs"
         gen_dirs = sorted(
             [p for p in out_root.glob("generate_*") if p.is_dir()],
@@ -116,6 +117,9 @@ class ExperimentWatcher(threading.Thread):
         if not gen_dirs:
             return
         output_dir = gen_dirs[-1]  # latest run
+        self._poll_local_usage(
+            output_dir / "gen_initial" / "hyperagents" / paths.usage_log_relpath()
+        )
         if self._output_dir_changed(output_dir):
             self.bus.publish(
                 self.exp_id, "output_dir", {"output_dir": str(output_dir)}

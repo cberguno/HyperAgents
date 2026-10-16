@@ -56,6 +56,20 @@ class ExperimentRunner:
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------------ helpers
+    def _subprocess_env(self) -> dict:
+        """Environment for experiment subprocesses.
+
+        Security: ALL provider API keys are stripped — experiment processes
+        (and the containers they spawn) never see provider credentials; the
+        only LLM path is the platform proxy with per-experiment HACP tokens.
+        """
+        from .config import PROVIDER_KEY_VARS
+
+        env = {k: v for k, v in os.environ.items() if k not in PROVIDER_KEY_VARS}
+        env["PYTHONUNBUFFERED"] = "1"
+        env["MPLBACKEND"] = "Agg"  # headless matplotlib for upstream analysis plots
+        return env
+
     def _workspace(self, exp_id: str) -> Path:
         return paths.workspace_dir(exp_id, self.home)
 
@@ -130,12 +144,8 @@ class ExperimentRunner:
             run_id = self._new_run_id()
 
         # 3. Build the subprocess command (unmodified upstream entry point)
-        env = {
-            k: v for k, v in os.environ.items()
-            if k not in {"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "OPENROUTER_API_KEY"}
-        }
+        env = self._subprocess_env()
         env["HACP_PLATFORM_CONFIG"] = str(ws / paths.platform_config_relpath())
-        env["PYTHONUNBUFFERED"] = "1"
         if cfg.seed is not None:
             env.setdefault("PYTHONHASHSEED", str(cfg.seed))
 
@@ -207,7 +217,7 @@ class ExperimentRunner:
             self._watchers[exp_id] = watcher
 
         sup = threading.Thread(
-            target=self._supervise, args=(exp_id, proc, cfg, watcher), daemon=True
+            target=self._supervise, args=(exp_id, proc, cfg, watcher, run_id), daemon=True
         )
         sup.start()
         with self._lock:
@@ -285,12 +295,8 @@ class ExperimentRunner:
         if workspace_status(exp_id, self.home)["initial_evals_ready"]:
             return {"seeded": True, "already": True}
 
-        env = {
-            k: v for k, v in os.environ.items()
-            if k not in {"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "OPENROUTER_API_KEY"}
-        }
+        env = self._subprocess_env()
         env["HACP_PLATFORM_CONFIG"] = str(ws / paths.platform_config_relpath())
-        env["PYTHONUNBUFFERED"] = "1"
 
         steps = [
             [sys.executable, "-m", "domains.paper_review.curate_subsets"],
@@ -329,7 +335,7 @@ class ExperimentRunner:
         return {"seeded": True}
 
     # ------------------------------------------------------------------ internals
-    def _supervise(self, exp_id: str, proc: subprocess.Popen, cfg: ExperimentConfig, watcher):
+    def _supervise(self, exp_id: str, proc: subprocess.Popen, cfg: ExperimentConfig, watcher, run_id: str | None = None):
         """Watch one subprocess: budget, wallclock, exit status.
 
         Guards against resume races: this supervisor only finalizes the
@@ -390,6 +396,9 @@ class ExperimentRunner:
                     reason=f"exit code {proc_rc}",
                 )
             self.bus.publish(exp_id, "loop_exited", {"returncode": proc_rc})
+            # upstream's own finally-block cleanup may have been preempted by
+            # an exception — always sweep containers named for this run
+            self._cleanup_docker(run_id)
 
     def _finalize(self, exp_id: str, status: str, reason: Optional[str] = None):
         """Idempotent: only transition out of active statuses."""

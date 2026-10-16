@@ -53,7 +53,27 @@ _PRICING: dict[str, tuple[str, float, float, str]] = {
     # --- Offline stub (never billed) ---
     "stub/tiny": ("stub", 0.0, 0.0, "Offline stub model (no cost)"),
     "stub/task": ("stub", 0.0, 0.0, "Offline stub model (no cost)"),
+    "stub/patcher": ("stub", 0.0, 0.0, "Offline stub model that applies a tool-use patch (rehearsals)"),
 }
+
+# Canonical ids that differ from the provider's own API name. OpenRouter uses
+# short marketing slugs (e.g. anthropic/claude-sonnet-4.5) while our registry
+# stores the dated API names used by upstream code. The proxy translates
+# canonical -> OpenRouter slug when forwarding; the ledger keeps the
+# canonical id so pricing stays consistent.
+_OPENROUTER_SLUGS: dict[str, str] = {
+    "anthropic/claude-sonnet-4-5-20250929": "anthropic/claude-sonnet-4.5",
+    "anthropic/claude-haiku-4-5": "anthropic/claude-haiku-4.5",
+    "anthropic/claude-3-5-sonnet-20241022": "anthropic/claude-3.5-sonnet",
+    "anthropic/claude-3-haiku-20240307": "anthropic/claude-3-haiku",
+    # openai/* and gemini/* ids are already valid OpenRouter slugs
+}
+
+# Provider credentials never reach experiment containers; the runner strips
+# these from subprocess environments and only the platform process holds them.
+PROVIDER_KEY_VARS = [
+    "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "OPENROUTER_API_KEY",
+]
 
 _ALIASES: dict[str, str] = {
     # convenience names -> canonical ids
@@ -95,6 +115,12 @@ def resolve_model(name: str) -> ModelInfo:
     if ov:
         return ModelInfo(n, "custom", ov[0], ov[1], n, True)
     return ModelInfo(n, "unknown", 0.0, 0.0, n, False)
+
+
+def openrouter_slug(model: str) -> str:
+    """Translate a canonical model id to the OpenRouter slug (identity if unmapped)."""
+    n = normalize_model(model)
+    return _OPENROUTER_SLUGS.get(n, n)
 
 
 def estimate_cost(model: str, prompt_tokens: int | float, completion_tokens: int | float) -> float:

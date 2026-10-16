@@ -1,0 +1,19 @@
+# Platform runtime layer for the upstream HyperAgents image.
+#
+# WHY THIS EXISTS (no Meta code is modified):
+# Upstream's build_container() runs experiment containers as root and
+# bind-mounts the experiment workspace snapshot (gen_initial/hyperagents)
+# at /hyperagents. The snapshot is owned by the workspace user (uid != 0),
+# so git inside the container refuses to operate on it ("detected dubious
+# ownership") — breaking upstream's in-container `git add`/`git apply`/
+# reset/clean and any commits the meta-agent makes via its bash tool.
+#
+# This layer adds ONLY container-runtime git configuration (safe.directory
+# + a commit identity) on top of the image built from Meta's unmodified
+# Dockerfile. Build the base first (see build_runtime_image.sh), then this.
+FROM hyperagents-buildtest
+
+RUN git config --global --add safe.directory '*' \
+ && git config --global --add safe.directory /hyperagents \
+ && git config --global user.email "hacp@platform.local" \
+ && git config --global user.name "HyperAgents Control Platform"

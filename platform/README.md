@@ -89,6 +89,39 @@ Environment: `HACP_PORT`, `HACP_HOME`, `HACP_UPSTREAM` (stub|openrouter),
    `generate_loop.py` in the experiment's workspace (needs a Docker daemon).
 4. Monitor live: generations, scores, tokens, cost; stop/resume anytime.
 
+### Runtime image (build once per host)
+
+Experiments run inside containers built from the image named `hyperagents`.
+Build it from a prepared experiment workspace (never from the repo root),
+then add the platform runtime layer:
+
+```bash
+WS=<experiment workspace>; cd "$WS"
+docker build --network=host -t hyperagents-buildtest .   # Meta's unmodified Dockerfile
+platform/docker/build_runtime_image.sh                  # adds git safe.directory -> hyperagents
+```
+
+The runtime layer exists because upstream bind-mounts the user-owned snapshot
+into root containers; without `safe.directory` git refuses in-container
+operations (exit 128). It adds only git runtime config — no Meta code changes.
+
+### Host-side system dependencies (for the runner venv)
+
+Upstream `generate_loop.py` and its seed/analysis commands run with the
+platform venv, which therefore also needs: `matplotlib networkx scipy
+hydra-core GitPython numpy pandas` (+ system `graphviz` and pip `pygraphviz`
+for archive visualizations). See `platform/requirements.txt`.
+
+### Operational notes
+
+- Experiment containers write into the bind-mounted workspace as **root**;
+  rebuilding a workspace afterwards may need `sudo rm -rf` (upstream's
+  `git clean` removes most residue at each generation boundary).
+- Budgets are **cumulative per experiment** across seeds, runs and resumes —
+  enforced server-side by the proxy (see `tests/test_bypass_resistance.py`).
+- Resuming a `finished` experiment (after raising `max_generation`) continues
+  the same lineage via upstream `--resume_from`.
+
 ## Tests (offline, no API charges)
 
 ```bash

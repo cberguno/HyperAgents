@@ -32,12 +32,16 @@ import httpx
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from .config import ServiceConfig, normalize_model, resolve_model
+from .config import (
+    PROVIDER_KEY_VARS,
+    ServiceConfig,
+    normalize_model,
+    openrouter_slug,
+    resolve_model,
+)
 from .store import Store
 
-PROVIDER_KEY_VARS = [
-    "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "OPENROUTER_API_KEY",
-]
+PROVIDER_KEY_VARS  # re-exported for backwards imports (defined in config.py)
 
 PLATFORM_TOKEN = "hacp-platform-shell"
 
@@ -76,6 +80,9 @@ class OpenRouterUpstream:
         )
 
     async def complete(self, payload: dict) -> tuple[dict, int]:
+        # Translate canonical model ids to OpenRouter slugs (the ledger keeps
+        # the canonical id; only the forwarded payload is rewritten).
+        payload = {**payload, "model": openrouter_slug(payload.get("model", ""))}
         resp = await self._client.post("/chat/completions", json=payload)
         try:
             return resp.json(), resp.status_code
@@ -98,10 +105,22 @@ class StubUpstream:
         model = payload.get("model", "stub/tiny")
         messages = payload.get("messages", [])
         prompt_tokens = sum(len(str(m.get("content", ""))) // 4 + 8 for m in messages)
-        content = (
-            f"[stub:{model}] Offline deterministic response "
-            f"({len(messages)} message(s) received). No real API call was made."
-        )
+        if model.endswith("stub/patcher") and len(messages) <= 1:
+            # Rehearsal mode: behave like a meta-agent that uses its bash tool
+            # to append a harmless marker line, producing a real (non-empty)
+            # model_patch.diff so the full pipeline — diff capture, compilation
+            # checks, in-container evaluation — is exercised end-to-end.
+            content = (
+                "<json>\n"
+                '{"tool_name": "bash", "tool_input": '
+                "{\"command\": \"echo '# hacp-rehearsal-marker' >> task_agent.py\"}}\n"
+                "</json>"
+            )
+        else:
+            content = (
+                f"[stub:{model}] Offline deterministic response "
+                f"({len(messages)} message(s) received). No real API call was made."
+            )
         completion_tokens = len(content) // 4 + 6
         body = {
             "id": f"chatcmpl-stub-{int(time.time()*1000)}",

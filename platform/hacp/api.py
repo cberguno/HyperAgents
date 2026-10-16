@@ -257,18 +257,24 @@ def create_app(service: ServiceConfig | None = None) -> FastAPI:
                 return 0.0
         for gen_dir in sorted(out.glob("gen_*"), key=_gen_sort_key):
             meta = _read_json(gen_dir / "metadata.json")
-            if meta is None:
+            # gen_initial has no metadata.json by design (upstream writes only
+            # the initial evals there) — still include it as a root node
+            has_content = any(gen_dir.iterdir())
+            if meta is None and not has_content:
                 continue
-            gen = str(meta.get("current_genid", gen_dir.name.replace("gen_", "")))
+            gen = str((meta or {}).get("current_genid", gen_dir.name.replace("gen_", "")))
             try:
                 mtime = (gen_dir / "metadata.json").stat().st_mtime
             except OSError:
-                mtime = None
+                try:
+                    mtime = gen_dir.stat().st_mtime
+                except OSError:
+                    mtime = None
             node = {
                 "gen": gen,
-                "parent": meta.get("parent_genid"),
-                "valid_parent": meta.get("valid_parent", True) if gen != "initial" else True,
-                "parent_agent_success": meta.get("parent_agent_success"),
+                "parent": (meta or {}).get("parent_genid"),
+                "valid_parent": (meta or {}).get("valid_parent", True) if gen != "initial" else True,
+                "parent_agent_success": (meta or {}).get("parent_agent_success"),
                 "scores": _read_scores_for(gen_dir),
                 "completed_ts": mtime,
                 "duration_s": round(mtime - prev_mtime, 2) if (mtime and prev_mtime) else None,

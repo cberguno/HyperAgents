@@ -41,39 +41,47 @@ MODULE_BLOCK = '''
 import json as _hacp_json
 import os as _hacp_os
 import sys as _hacp_sys
+import threading as _hacp_threading
 import time as _hacp_time
 
 _HACP_CFG = None
 _HACP_CFG_LOADED = False
+_HACP_CFG_LOCK = _hacp_threading.Lock()
 
 
 def _hacp_load_config():
+    # Thread-safe: upstream harnesses call the LLM from worker pools, so this
+    # loader must never return a half-initialized (empty) config to a racing
+    # thread — that would silently drop proxy routing and fail on a missing
+    # provider key. Lock + set the flag only AFTER the config is populated.
     global _HACP_CFG, _HACP_CFG_LOADED
-    if _HACP_CFG_LOADED:
+    with _HACP_CFG_LOCK:
+        if _HACP_CFG_LOADED:
+            return _HACP_CFG
+        _cfg = {}
+        try:
+            candidates = []
+            _env = _hacp_os.environ.get("HACP_PLATFORM_CONFIG")
+            if _env:
+                candidates.append(_env)
+            _here = _hacp_os.path.dirname(_hacp_os.path.abspath(__file__))
+            _root = _hacp_os.path.dirname(_here)
+            candidates += [
+                _hacp_os.path.join(_hacp_os.getcwd(), "platform_config.json"),
+                _hacp_os.path.join(_root, "platform_config.json"),
+                _hacp_os.path.join(_root, "misc", "hacp", "platform_config.json"),
+                _hacp_os.path.join(_hacp_os.getcwd(), "misc", "hacp", "platform_config.json"),
+            ]
+            for _path in candidates:
+                if _path and _hacp_os.path.exists(_path):
+                    with open(_path, "r") as _f:
+                        _cfg = _hacp_json.load(_f)
+                    break
+        except Exception:
+            _cfg = {}
+        _HACP_CFG = _cfg
+        _HACP_CFG_LOADED = True
         return _HACP_CFG
-    _HACP_CFG_LOADED = True
-    _HACP_CFG = {}
-    candidates = []
-    _env = _hacp_os.environ.get("HACP_PLATFORM_CONFIG")
-    if _env:
-        candidates.append(_env)
-    try:
-        _here = _hacp_os.path.dirname(_hacp_os.path.abspath(__file__))
-        _root = _hacp_os.path.dirname(_here)
-        candidates += [
-            _hacp_os.path.join(_hacp_os.getcwd(), "platform_config.json"),
-            _hacp_os.path.join(_root, "platform_config.json"),
-            _hacp_os.path.join(_root, "misc", "hacp", "platform_config.json"),
-            _hacp_os.path.join(_hacp_os.getcwd(), "misc", "hacp", "platform_config.json"),
-        ]
-        for _path in candidates:
-            if _path and _hacp_os.path.exists(_path):
-                with open(_path, "r") as _f:
-                    _HACP_CFG = _hacp_json.load(_f)
-                break
-    except Exception:
-        pass
-    return _HACP_CFG
 
 
 def _hacp_role():

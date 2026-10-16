@@ -21,7 +21,9 @@ bind-mounted at /hyperagents by upstream ``build_container``).
 """
 from __future__ import annotations
 
+import fnmatch
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -30,11 +32,33 @@ from . import paths
 from .config import ExperimentConfig, ServiceConfig
 from .instrumentation import apply_instrumentation, verify_instrumentation
 
-# Never copied from the pristine repo into an experiment workspace.
-COPY_IGNORE = shutil.ignore_patterns(
-    "platform", ".venv*", "venv*", "venv_nat", "__pycache__", "*.pyc",
-    ".pytest_cache", "outputs", "outputs_os", ".claude", ".mypy_cache",
-)
+# Exclusions for copying the pristine repo into an experiment workspace.
+# CRITICAL (regression-tested): these apply at the TOP LEVEL of the repo only
+# — blanket name patterns would also strip nested paths like
+# .git/refs/heads/platform/ (the platform's own branch ref!) and silently
+# break upstream git operations. Cache artifacts are excluded everywhere.
+_TOP_LEVEL_EXACT = {"platform", ".venv", "venv", "venv_nat", "outputs", "outputs_os", ".claude", ".pytest_cache", ".mypy_cache"}
+_TOP_LEVEL_PATTERNS = ("outputs_os*", ".venv*", "venv*")
+_EVERYWHERE = ("__pycache__", "*.pyc", ".pytest_cache")
+
+
+def _make_copy_ignore(upstream_root: Path):
+    upstream_root_abs = str(upstream_root.resolve())
+
+    def ignore(src, names):
+        src_abs = os.path.abspath(src)
+        is_top = os.path.normpath(src_abs) == os.path.normpath(upstream_root_abs)
+        ignored = []
+        for name in names:
+            if is_top and name in _TOP_LEVEL_EXACT:
+                ignored.append(name)
+            elif is_top and any(fnmatch.fnmatch(name, p) for p in _TOP_LEVEL_PATTERNS):
+                ignored.append(name)
+            elif any(fnmatch.fnmatch(name, p) for p in _EVERYWHERE):
+                ignored.append(name)
+        return ignored
+
+    return ignore
 
 
 def workspace_exists(exp_id: str, home: Path | None = None) -> bool:
@@ -79,13 +103,20 @@ def prepare_workspace(
         shutil.rmtree(ws)
     ws.parent.mkdir(parents=True, exist_ok=True)
 
-    # 1. Copy the pristine repo (keeping .git — upstream git operations need it).
-    shutil.copytree(upstream, ws, ignore=COPY_IGNORE, symlinks=True)
+    # 1. Copy the pristine repo (keeping .git — upstream git operations need it,
+    #    including the branch ref under .git/refs/heads/).
+    shutil.copytree(upstream, ws, ignore=_make_copy_ignore(upstream), symlinks=True)
 
     # 2. Apply the instrumentation patch to the copy.
     patch_manifest = apply_instrumentation(ws)
 
     # 3. Platform config: per-role model overrides + proxy routing + usage log.
+    #    Written BOTH at the workspace root and under misc/hacp/: upstream
+    #    setup_initial_gen excludes 'misc' when creating the evolvable agent
+    #    snapshot (gen_initial/hyperagents) that gets bind-mounted into
+    #    experiment containers — so the ROOT copy is the one containers find
+    #    (cwd/platform_config.json with cwd=/hyperagents). The misc/hacp copy
+    #    keeps platform artifacts grouped and is found by host-side runs.
     hacp_dir = ws / "misc" / "hacp"
     hacp_dir.mkdir(parents=True, exist_ok=True)
     platform_config = {
@@ -98,6 +129,7 @@ def prepare_workspace(
         "usage_log": paths.usage_log_relpath(),
     }
     (hacp_dir / "platform_config.json").write_text(json.dumps(platform_config, indent=2))
+    (ws / "platform_config.json").write_text(json.dumps(platform_config, indent=2))
     (ws / paths.usage_log_relpath()).parent.mkdir(parents=True, exist_ok=True)
     (ws / paths.usage_log_relpath()).touch()
 

@@ -89,6 +89,38 @@ def test_full_lifecycle_start_stop_resume_finish(live_server, service):
     assert gens, "no generation summaries recorded"
     last_gens = gens[-1]
     assert any(g["scores"]["paper_review"]["train"] for g in last_gens)
+    # execution speed: per-generation durations recorded
+    durations = [g["duration_s"] for g in last_gens if g.get("duration_s") is not None]
+    assert durations, "no generation durations recorded"
+
+    # --- evolutionary lineage endpoint
+    lin = client.get(f"/api/experiments/{eid}/lineage").json()
+    assert lin["total_generations"] >= 4
+    assert "initial" in lin["roots"]
+    gens_by_name = {n["gen"]: n for n in lin["nodes"]}
+    assert gens_by_name["1"]["parent"] == "initial"
+    assert str(gens_by_name["1"]["parent"]) == "initial"
+    assert gens_by_name["initial"].get("children") and "1" in gens_by_name["initial"]["children"]
+    assert gens_by_name["1"]["scores"]["paper_review"]["train"] > 0.52
+
+    # --- generation detail: history + memory (meta-agent patch & chat)
+    detail = client.get(f"/api/experiments/{eid}/generations/1").json()
+    assert detail["metadata"]["parent_genid"] == "initial"
+    assert "model_patch" in detail and "stub patch for generation 1" in detail["model_patch"]
+    assert "meta_chat_history_tail" in detail
+    assert "Generation 1" in detail["meta_chat_history_tail"]
+    missing = client.get(f"/api/experiments/{eid}/generations/999")
+    assert missing.status_code == 404
+
+    # --- comparison includes generation stats (scores + speed)
+    exp2_id = client.post("/api/experiments", json={"name": "cmp-2", "loop": "stub", "max_generation": 1}).json()["id"]
+    client.post(f"/api/experiments/{exp2_id}/start")
+    _wait_status(client, exp2_id, {"finished", "failed"}, timeout=30)
+    comp = client.get(f"/api/comparison?ids={eid},{exp2_id}").json()["comparison"]
+    for col in comp:
+        assert col["generation_stats"]["count"] >= 2
+        assert col["generation_stats"]["best_train_scores"]["paper_review"] > 0
+        assert col["generation_stats"]["avg_generation_seconds"] is not None
 
     # --- pristine repo untouched
     pristine = (REPO_ROOT / "agent" / "llm.py").read_text()

@@ -19,6 +19,16 @@ only the platform that wraps it.
 | Conversational shell foundation | `hacp/shell.py` — read-only inspection tools, independently configurable model |
 | Offline tests & demo | stub loop + stub LLM upstream — **zero API cost** |
 
+## M2 additions
+
+- **Experiment editing** — models, budgets, max generations via `PATCH` + Edit dialog (model ids canonicalized on write)
+- **Execution speed** — per-generation durations (watcher → SSE → table), avg LLM latency, avg gen time, elapsed time
+- **Evolutionary lineage** — `GET /api/experiments/{id}/lineage` reconstructs the tree from upstream `archive.jsonl` + `metadata.json`; rendered in the detail view
+- **Generation memory & history** — `GET /api/experiments/{id}/generations/{gen}` returns metadata, scores, the meta-agent's `model_patch.diff` and chat-history tail; clickable rows in the dashboard
+- **Richer comparison** — best train score, avg gen time, generation count, LLM calls, correct wallclock
+- **Shell tools** — `get_lineage`, `get_generation` (8 read-only tools total)
+- **Trading domain design** — `platform/docs/trading-domain-design.md` (M5 foundation, no implementation yet)
+
 ## Architecture
 
 ```

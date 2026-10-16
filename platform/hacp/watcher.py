@@ -137,10 +137,18 @@ class ExperimentWatcher(threading.Thread):
                 self.exp_id, current_gen=str(self._archive[-1]) if self._archive else None
             )
 
-        # 3c. per-generation metadata + scores
+        # 3c. per-generation metadata + scores (chronological by completion
+        # time so duration chains are correct: initial -> 1 -> 2 ...)
         summaries = {}
-        for gen_dir in sorted(output_dir.glob("gen_*"), key=lambda p: p.name):
-            s = self._generation_summary(gen_dir)
+        prev_mtime = None
+        def _gen_sort_key(p: Path):
+            try:
+                return (p / "metadata.json").stat().st_mtime
+            except OSError:
+                return 0.0
+        for gen_dir in sorted(output_dir.glob("gen_*"), key=_gen_sort_key):
+            s = self._generation_summary(gen_dir, prev_mtime)
+            prev_mtime = s["completed_ts"] if s else prev_mtime
             if s:
                 summaries[s["gen"]] = s
         changed = summaries != self._gen_summaries
@@ -209,11 +217,15 @@ class ExperimentWatcher(threading.Thread):
                     },
                 )
 
-    def _generation_summary(self, gen_dir: Path) -> Optional[dict]:
+    def _generation_summary(self, gen_dir: Path, prev_mtime: Optional[float] = None) -> Optional[dict]:
         metadata = _read_json(gen_dir / "metadata.json")
         if metadata is None:
             return None
         gen = str(metadata.get("current_genid", gen_dir.name.replace("gen_", "")))
+        try:
+            completed_ts = (gen_dir / "metadata.json").stat().st_mtime
+        except OSError:
+            completed_ts = None
         summary = {
             "gen": gen,
             "parent": metadata.get("parent_genid"),
@@ -221,6 +233,12 @@ class ExperimentWatcher(threading.Thread):
             "run_full_eval": metadata.get("run_full_eval"),
             "valid_parent": metadata.get("valid_parent"),
             "parent_agent_success": metadata.get("parent_agent_success"),
+            "completed_ts": completed_ts,
+            "duration_s": (
+                round(completed_ts - prev_mtime, 2)
+                if completed_ts is not None and prev_mtime is not None
+                else None
+            ),
             "scores": {},
         }
         for eval_dir in sorted(gen_dir.iterdir()):

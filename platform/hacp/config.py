@@ -13,7 +13,7 @@ import os
 from dataclasses import dataclass
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +185,14 @@ class ExperimentConfig(BaseModel):
         description="'generate' = real upstream generate_loop.py (needs Docker); "
         "'stub' = offline simulated loop (tests/demos, no API cost).",
     )
+
+    @field_validator("meta_model", "task_model")
+    @classmethod
+    def _canonical_model(cls, v: str) -> str:
+        """Store canonical model ids (e.g. 'anthropic/claude-sonnet-4.5' ->
+        'anthropic/claude-sonnet-4-5-20250929') so catalog lookups and UI
+        prefill always match."""
+        return normalize_model(v)
 
     def generate_loop_args(self, run_id: str, resume_from: str | None) -> list[str]:
         """Map this config onto upstream generate_loop.py CLI flags (unmodified)."""

@@ -56,6 +56,12 @@ th { color: var(--subtle); font-weight: 500; }
 
 .log { background: #0a0d12; border: 1px solid var(--border); border-radius: 8px; padding: 12px; max-height: 320px; overflow-y: auto; font: 12px/1.5 ui-monospace, "SF Mono", Menlo, monospace; color: #9ecbff; white-space: pre-wrap; word-break: break-all; }
 
+.lineage { background: #0a0d12; border: 1px solid var(--border); border-radius: 8px; padding: 12px; max-height: 260px; overflow: auto; font: 12px/1.6 ui-monospace, "SF Mono", Menlo, monospace; color: #7ee2a8; white-space: pre; margin: 0; }
+tr.gen-row { cursor: pointer; }
+tr.gen-row:hover td { background: rgba(79,143,247,.08); }
+.code { background: #0a0d12; border: 1px solid var(--border); border-radius: 8px; padding: 10px; max-height: 220px; overflow: auto; font: 11px/1.5 ui-monospace, Menlo, monospace; white-space: pre-wrap; margin: 6px 0 10px; }
+.gen-body h4 { margin: 10px 0 4px; color: var(--subtle); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
+
 .compare-selects { display: flex; gap: 10px; margin-bottom: 14px; }
 select, input[type=text], input[type=number] { background: var(--panel); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 8px 10px; font-size: 13px; }
 select { min-width: 220px; }

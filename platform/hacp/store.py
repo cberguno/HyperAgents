@@ -259,7 +259,8 @@ class Store:
         source='local' is the in-workspace instrumentation log (reconciliation)."""
         q = (
             "SELECT COALESCE(SUM(prompt_tokens),0) p, COALESCE(SUM(completion_tokens),0) c, "
-            "COALESCE(SUM(total_tokens),0) t, COALESCE(SUM(cost_usd),0) cost, COUNT(*) n "
+            "COALESCE(SUM(total_tokens),0) t, COALESCE(SUM(cost_usd),0) cost, COUNT(*) n, "
+            "AVG(latency_s) avg_latency "
             "FROM usage WHERE status='ok'"
         )
         params: list[Any] = []
@@ -276,6 +277,7 @@ class Store:
             "total_tokens": r["t"],
             "cost_usd": round(r["cost"], 6),
             "requests": r["n"],
+            "avg_latency_s": round(r["avg_latency"], 4) if r["avg_latency"] is not None else None,
             "source": source,
         }
 
@@ -385,6 +387,21 @@ class Store:
                 "SELECT position FROM slots WHERE experiment_id IS NULL ORDER BY position LIMIT 1"
             ).fetchone()
         return row["position"] if row else None
+
+    def latest_generations(self, experiment_id: str) -> list[dict]:
+        """Most recent 'generations' event payload for an experiment."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT data_json FROM events WHERE experiment_id=? AND type='generations' "
+                "ORDER BY id DESC LIMIT 1",
+                (experiment_id,),
+            ).fetchall()
+        if not rows:
+            return []
+        try:
+            return json.loads(rows[0]["data_json"]).get("generations", [])
+        except Exception:
+            return []
 
     # -- comparison --------------------------------------------------------------
     def comparison(self, exp_ids: list[str]) -> list[dict]:

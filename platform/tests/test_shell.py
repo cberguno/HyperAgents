@@ -85,3 +85,58 @@ def test_shell_explain_failure_assembles_context(store, tmp_path):
     assert "boom" in ctx["error"]
     assert "meta agent tried X" in ctx["meta_chat_history_tail"]
     assert ctx["model_patch_head"].startswith("--- a/task_agent.py")
+
+
+def test_shell_lineage_tool(store, tmp_path):
+    exp = store.create_experiment({"name": "lineage-exp"})
+    store.add_event(exp["id"], "generations", {"generations": [
+        {"gen": "initial", "parent": None, "duration_s": None,
+         "scores": {"paper_review": {"train": 0.52}}, "valid_parent": True},
+        {"gen": "1", "parent": "initial", "duration_s": 61.0,
+         "scores": {"paper_review": {"train": 0.55}}, "valid_parent": True},
+        {"gen": "2", "parent": "1", "duration_s": 58.0,
+         "scores": {"paper_review": {"train": 0.58}}, "valid_parent": True},
+    ]})
+    tools = {t["name"]: t for t in build_tools(store, tmp_path)}
+    lineage = tools["get_lineage"]["fn"](exp["id"])
+    assert [n["gen"] for n in lineage] == ["initial", "1", "2"]
+    assert lineage[2]["parent"] == "1"
+    assert lineage[1]["duration_s"] == 61.0
+    assert lineage[2]["train_scores"]["paper_review"] == 0.58
+    # empty case
+    fresh = store.create_experiment({"name": "no-gens"})
+    assert "note" in tools["get_lineage"]["fn"](fresh["id"])
+
+
+def test_shell_generation_memory_tool(store, tmp_path):
+    exp = store.create_experiment({"name": "mem-exp"})
+    out_dir = tmp_path / "outputs" / "generate_y" / "gen_3" / "agent_output"
+    out_dir.mkdir(parents=True)
+    (out_dir / "meta_agent_chat_history.md").write_text("chat tail of gen 3")
+    (out_dir / "model_patch.diff").write_text("--- a/task_agent.py\n+++ b/task_agent.py")
+    store.update_experiment(exp["id"], output_dir=str(tmp_path / "outputs" / "generate_y"))
+    tools = {t["name"]: t for t in build_tools(store, tmp_path)}
+    detail = tools["get_generation"]["fn"](exp["id"], gen="3")
+    assert detail["gen"] == "3"
+    assert "chat tail of gen 3" in detail["meta_chat_history_tail"]
+    assert detail["model_patch"].startswith("--- a/task_agent.py")
+    assert "model_patch.diff" in detail["files"]
+    assert "error" in tools["get_generation"]["fn"](exp["id"], gen="404")
+
+
+def test_shell_uses_lineage_tool_in_loop(store, tmp_path):
+    """The shell answers a lineage question through the real tool."""
+    exp = store.create_experiment({"name": "loop-exp"})
+    store.add_event(exp["id"], "generations", {"generations": [
+        {"gen": "initial", "parent": None, "duration_s": None, "scores": {}, "valid_parent": True},
+        {"gen": "1", "parent": "initial", "duration_s": 61.0, "scores": {}, "valid_parent": True},
+    ]})
+    scripted = [
+        f'<json>{{"tool_name": "get_lineage", "tool_input": {{"experiment_id": "{exp['id']}"}}}}</json>',
+        "The lineage is initial -> gen 1.",
+    ]
+    shell = _mk_shell(store, tmp_path, scripted)
+    out = shell.run("show me the lineage")
+    assert out["tool_calls"][0]["tool_name"] == "get_lineage"
+    assert out["tool_calls"][0]["result"][1]["parent"] == "initial"
+    assert "gen 1" in out["reply"]

@@ -97,6 +97,31 @@ def test_comparison_endpoint(client):
     r = client.get(f"/api/comparison?ids={a},{b}")
     comp = r.json()["comparison"]
     assert [c["name"] for c in comp] == ["c1", "c2"]
+    # no generations recorded yet -> zeroed generation stats, no crash
+    assert comp[0]["generation_stats"]["count"] == 0
+
+
+def test_comparison_enriched_with_generation_stats(client):
+    store = client.app.state.store
+    eid = client.post("/api/experiments", json={"name": "enriched"}).json()["id"]
+    store.add_event(eid, "generations", {"generations": [
+        {"gen": "initial", "parent": None, "duration_s": None, "scores": {"paper_review": {"train": 0.52}}},
+        {"gen": "1", "parent": "initial", "duration_s": 84.2, "scores": {"paper_review": {"train": 0.55}}},
+    ]})
+    comp = client.get(f"/api/comparison?ids={eid}").json()["comparison"][0]
+    gs = comp["generation_stats"]
+    assert gs["count"] == 2
+    assert gs["best_train_scores"]["paper_review"] > 0.54
+    assert gs["avg_generation_seconds"] == 84.2
+
+
+def test_usage_totals_include_latency(client):
+    store = client.app.state.store
+    eid = client.post("/api/experiments", json={"name": "lat"}).json()["id"]
+    store.add_usage(eid, "meta", "openai/gpt-4o-mini", 100, 50, latency_s=1.25)
+    store.add_usage(eid, "meta", "openai/gpt-4o-mini", 100, 50, latency_s=2.75)
+    usage = client.get(f"/api/experiments/{eid}/usage").json()
+    assert usage["totals_proxy"]["avg_latency_s"] == 2.0
 
 
 def test_shell_chat_with_injected_client(client, service):

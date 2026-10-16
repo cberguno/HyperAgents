@@ -106,6 +106,17 @@ def main():
 
         gen_dir = out_dir / f"gen_{genid}"
         gen_dir.mkdir(exist_ok=True)
+        agent_output = gen_dir / "agent_output"
+        agent_output.mkdir(exist_ok=True)
+        (agent_output / "meta_agent_chat_history.md").write_text(
+            f"# Meta-agent chat history (stub)\n\n"
+            f"Instruction: Modify any part of the codebase at `./`.\n\n"
+            f"Generation {genid}: [stub offline reasoning] Improved the task agent prompt.\n"
+        )
+        (agent_output / "model_patch.diff").write_text(
+            f"--- a/task_agent.py\n+++ b/task_agent.py\n@@ -10,3 +10,4 @@\n"
+            f" # stub patch for generation {genid}\n+ # improved review heuristic v{genid}\n"
+        )
 
         # Simulate the meta-agent + eval LLM calls through the real proxy path.
         try:

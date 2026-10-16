@@ -118,6 +118,43 @@ def build_tools(store: Store, home: Path):
                 ctx["generate_log_tail"] = gl.read_text()[-4000:]
         return ctx
 
+    def get_lineage(experiment_id: str):
+        """Evolutionary lineage: each generation's parent, scores, duration."""
+        gens = store.latest_generations(experiment_id)
+        if not gens:
+            return {"note": "no generations recorded yet"}
+        return [
+            {
+                "gen": g["gen"], "parent": g.get("parent"),
+                "duration_s": g.get("duration_s"),
+                "train_scores": {
+                    d: s.get("train") for d, s in (g.get("scores") or {}).items()
+                },
+                "valid_parent": g.get("valid_parent"),
+            }
+            for g in gens
+        ]
+
+    def get_generation(experiment_id: str, gen: str):
+        """Memory + history of one generation: metadata, files, the
+        meta-agent's diff and chat-history tail (truncated)."""
+        e = store.get_experiment(experiment_id)
+        if not e:
+            return {"error": "experiment not found"}
+        if not e.get("output_dir"):
+            return {"note": "no output directory yet"}
+        gd = Path(e["output_dir"]) / f"gen_{gen}"
+        if not gd.exists():
+            return {"error": f"generation {gen} not found"}
+        out = {"gen": gen, "files": sorted(p.name for p in gd.rglob("*") if p.is_file())}
+        patch = gd / "agent_output" / "model_patch.diff"
+        chat = gd / "agent_output" / "meta_agent_chat_history.md"
+        if patch.exists():
+            out["model_patch"] = patch.read_text()[:3000]
+        if chat.exists():
+            out["meta_chat_history_tail"] = chat.read_text()[-3000:]
+        return out
+
     return [
         _tool("list_experiments", "List all experiments with status, models, tokens and cost.", list_experiments),
         _tool("get_experiment", "Full details of one experiment by id.", get_experiment),
@@ -125,6 +162,8 @@ def build_tools(store: Store, home: Path):
         _tool("get_usage", "Token/cost usage for one experiment (or all if omitted).", get_usage),
         _tool("tail_logs", "Recent experiment log lines.", tail_logs),
         _tool("explain_failure", "Assemble failure context (logs, chat history, diff) for explanation.", explain_failure),
+        _tool("get_lineage", "Evolutionary lineage of an experiment (parents, scores, generation durations).", get_lineage),
+        _tool("get_generation", "Generation detail: metadata, files, meta-agent diff and chat history.", get_generation),
     ]
 
 

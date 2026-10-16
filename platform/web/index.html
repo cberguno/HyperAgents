@@ -36,9 +36,13 @@
           <div id="metrics" class="metrics"></div>
         </div>
         <div class="card">
-          <h3>Generations</h3>
+          <h3>Generations (click a row to inspect memory)</h3>
           <div id="generations" class="generations"></div>
         </div>
+      </div>
+      <div class="card">
+        <h3>Evolutionary lineage</h3>
+        <pre id="lineage" class="lineage">—</pre>
       </div>
       <div class="card">
         <h3>Live log</h3>
@@ -103,6 +107,35 @@
       <div class="dialog-actions">
         <button type="button" class="btn ghost" onclick="document.getElementById('create-dialog').close()">Cancel</button>
         <button type="submit" class="btn primary">Create</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="gen-dialog">
+    <h2 id="gen-dialog-title">Generation</h2>
+    <div id="gen-dialog-body" class="gen-body"></div>
+    <div class="dialog-actions">
+      <button type="button" class="btn" onclick="document.getElementById('gen-dialog').close()">Close</button>
+    </div>
+  </dialog>
+
+  <dialog id="edit-dialog">
+    <form id="edit-form" method="dialog">
+      <h2>Edit experiment <span id="edit-exp-label" class="subtle"></span></h2>
+      <label>Meta-agent model <select name="meta_model" id="edit-sel-meta"></select></label>
+      <label>Task-agent model <select name="task_model" id="edit-sel-task"></select></label>
+      <div class="row">
+        <label>Max generations <input name="max_generation" type="number" min="1" max="500"></label>
+        <label>Budget max cost ($) <input name="max_cost_usd" type="number" step="0.01" placeholder="unlimited"></label>
+      </div>
+      <div class="row">
+        <label>Budget max tokens <input name="max_tokens" type="number" placeholder="unlimited"></label>
+        <label>Max wallclock (h) <input name="max_wallclock_hours" type="number" step="0.1" placeholder="unlimited"></label>
+      </div>
+      <p class="subtle small">Editing is only possible while the experiment is not running. Model changes take effect on next start/resume.</p>
+      <div class="dialog-actions">
+        <button type="button" class="btn ghost" onclick="document.getElementById('edit-dialog').close()">Cancel</button>
+        <button type="submit" class="btn primary">Save</button>
       </div>
     </form>
   </dialog>

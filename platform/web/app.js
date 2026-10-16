@@ -85,7 +85,7 @@ async function openCreate(slotPos) {
   dlg.showModal();
 }
 
-async function fillModelSelect(sel, preferProvider) {
+async function fillModelSelect(sel, preferProvider, selectedValue) {
   const selEl = $(sel);
   if (!state.models.length) {
     const data = await jfetch(`${API}/models`);
@@ -96,7 +96,9 @@ async function fillModelSelect(sel, preferProvider) {
     .map((m) => `<option value="${m.id}">${m.label} — $${m.input_usd_per_mtok}/${m.output_usd_per_mtok} per Mtok</option>`)
     .join("");
   const preferred = state.models.find((m) => m.provider === preferProvider);
-  if (preferred) selEl.value = preferred.id;
+  const selected = selectedValue ? state.models.find((m) => m.id === selectedValue) : null;
+  if (selected) selEl.value = selected.id;
+  else if (preferred) selEl.value = preferred.id;
 }
 
 $("#create-form").addEventListener("submit", async (ev) => {
@@ -154,7 +156,18 @@ async function refreshDetail() {
   const e = await jfetch(`${API}/experiments/${state.selected}`);
   $("#detail-title").textContent = `${e.name} · ${e.id}`;
   renderControls(e);
-  renderMetrics(e);
+  const genStats = await fetchGenStats(e.id);
+  renderMetrics(e, genStats);
+  refreshLineage(e.id);
+}
+
+async function fetchGenStats(eid) {
+  const gens = state.genCache?.[eid];
+  if (!gens) return null;
+  const durations = gens.map((g) => g.duration_s).filter((d) => d != null);
+  return {
+    avg_generation_seconds: durations.length ? durations.reduce((a, b) => a + b, 0) / durations.length : null,
+  };
 }
 
 function renderControls(e) {
@@ -172,7 +185,8 @@ function renderControls(e) {
     };
     c.appendChild(b);
   };
-  const idle = ["created", "stopped", "paused", "paused_budget", "failed"].includes(e.status);
+  const idle = ["created", "stopped", "paused", "paused_budget", "failed", "finished"].includes(e.status);
+  const notRunning = e.status !== "running" && e.status !== "seeding";
   mk("Start", "/start", "primary", idle, "Launch the (unmodified) upstream generate_loop.py");
   if (e.workspace_status && e.workspace_status.initial_evals_ready === false && idle) {
     mk("Seed initial evals", "/seed", "", e.config.loop !== "stub",
@@ -180,19 +194,67 @@ function renderControls(e) {
   }
   mk("Pause", "/pause", "", e.status === "running", "SIGINT at the next safe boundary; resume with --resume_from");
   mk("Stop", "/stop", "danger", e.status === "running", "Graceful stop; history preserved");
-  mk("Resume", "/resume", "", ["paused", "paused_budget", "stopped"].includes(e.status),
+  mk("Resume", "/resume", "", ["paused", "paused_budget", "stopped", "finished"].includes(e.status),
     "Continues from the last completed generation (upstream --resume_from)");
+  const eb = document.createElement("button");
+  eb.className = "btn";
+  eb.textContent = "Edit";
+  eb.disabled = !notRunning;
+  eb.title = "Change models, budget, max generations (while not running)";
+  eb.onclick = () => openEdit(e);
+  c.appendChild(eb);
 }
 
-function renderMetrics(e) {
+async function openEdit(e) {
+  await Promise.all([fillModelSelect("#edit-sel-meta", null, e.config.meta_model),
+                     fillModelSelect("#edit-sel-task", null, e.config.task_model)]);
+  const f = $("#edit-form");
+  f.max_generation.value = e.config.max_generation;
+  f.max_cost_usd.value = e.config.budget?.max_cost_usd ?? "";
+  f.max_tokens.value = e.config.budget?.max_tokens ?? "";
+  f.max_wallclock_hours.value = e.config.budget?.max_wallclock_hours ?? "";
+  $("#edit-dialog").dataset.expId = e.id;
+  $("#edit-dialog").showModal();
+}
+
+$("#edit-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const dlg = $("#edit-dialog");
+  const eid = dlg.dataset.expId;
+  const f = new FormData(ev.target);
+  const body = {
+    meta_model: f.get("meta_model"),
+    task_model: f.get("task_model"),
+    max_generation: Number(f.get("max_generation")),
+    budget: {
+      max_cost_usd: numOrNull(f.get("max_cost_usd")),
+      max_tokens: numOrNull(f.get("max_tokens")),
+      max_wallclock_hours: numOrNull(f.get("max_wallclock_hours")),
+    },
+  };
+  try {
+    await jfetch(`${API}/experiments/${eid}`, { method: "PATCH", body: JSON.stringify(body) });
+    dlg.close();
+    refreshDetail();
+  } catch (err) { alert(`Edit failed: ${err.message}`); }
+});
+
+function renderMetrics(e, genStats) {
   const u = e.usage || {};
   const b = e.budget_state || {};
+  const avgLatency = u.avg_latency_s != null ? `${(u.avg_latency_s * 1000).toFixed(0)} ms` : "—";
+  const avgGen = genStats?.avg_generation_seconds != null ? `${genStats.avg_generation_seconds.toFixed(1)} s` : "—";
+  const dur = e.started_at && e.finished_at
+    ? `${((e.finished_at - e.started_at) / 60).toFixed(1)} min`
+    : e.started_at ? `${((Date.now() / 1000 - e.started_at) / 60).toFixed(1)} min` : "—";
   $("#metrics").innerHTML = `
     <div class="metric"><div class="label">Status</div><div class="value"><span class="status-chip st-${e.status}">${e.status}</span></div></div>
     <div class="metric"><div class="label">Current generation</div><div class="value">${e.current_gen ?? "—"}</div></div>
     <div class="metric"><div class="label">Tokens (proxy)</div><div class="value">${fmt.tokens(u.total_tokens)}</div></div>
     <div class="metric"><div class="label">Cost (est.)</div><div class="value">${fmt.money(u.cost_usd)}</div></div>
-    <div class="metric"><div class="label">Requests</div><div class="value">${u.requests ?? 0}</div></div>
+    <div class="metric"><div class="label">LLM calls</div><div class="value">${u.requests ?? 0} · ${avgLatency} avg</div></div>
+    <div class="metric"><div class="label">Avg gen time</div><div class="value">${avgGen}</div></div>
+    <div class="metric"><div class="label">Elapsed</div><div class="value">${dur}</div></div>
     <div class="metric"><div class="label">Budget</div><div class="value">${b.exceeded ? "EXCEEDED" : (JSON.stringify(b.limits || {}).length > 2 ? "within limits" : "unlimited")}</div></div>`;
 }
 
@@ -220,12 +282,57 @@ function openSSE(expId) {
 
 function renderGenerations(gens) {
   const el = $("#generations");
-  el.innerHTML = `<table><thead><tr><th>gen</th><th>parent</th><th>paper_review train</th><th>val</th></tr></thead><tbody>${
+  el.innerHTML = `<table><thead><tr><th>gen</th><th>parent</th><th>paper_review train</th><th>val</th><th>took</th></tr></thead><tbody>${
     gens.map((g) => {
       const s = (g.scores || {}).paper_review || {};
-      return `<tr><td>${g.gen}</td><td>${g.parent ?? "—"}</td><td>${fmt.score(s.train)}</td><td>${fmt.score(s.val)}</td></tr>`;
+      return `<tr data-gen="${g.gen}" class="gen-row" tabindex="0" role="button" aria-label="Inspect generation ${g.gen}"><td>${g.gen}</td><td>${g.parent ?? "—"}</td><td>${fmt.score(s.train)}</td><td>${fmt.score(s.val)}</td><td>${g.duration_s != null ? g.duration_s.toFixed(1) + "s" : "—"}</td></tr>`;
     }).join("")
   }</tbody></table>`;
+  el.querySelectorAll("tr.gen-row").forEach((row) => {
+    row.onclick = () => openGenDialog(state.selected, row.dataset.gen);
+    row.onkeydown = (ev) => { if (ev.key === "Enter" || ev.key === " ") openGenDialog(state.selected, row.dataset.gen); };
+  });
+  state.genCache = { ...(state.genCache || {}), [state.selected]: gens };
+}
+
+async function openGenDialog(eid, gen) {
+  try {
+    const d = await jfetch(`${API}/experiments/${eid}/generations/${encodeURIComponent(gen)}`);
+    $("#gen-dialog-title").textContent = `Generation ${gen} — history & memory`;
+    const scores = Object.entries(d.scores || {}).map(
+      ([dom, s]) => `${dom}: train=${fmt.score(s.train)} val=${fmt.score(s.val)}`
+    ).join(" · ") || "no scores";
+    $("#gen-dialog-body").innerHTML = `
+      <div class="subtle small">parent: ${d.metadata?.parent_genid ?? "—"} | ${scores}</div>
+      ${d.model_patch ? `<h4>Meta-agent patch</h4><pre class="code">${escapeHtml(d.model_patch)}</pre>` : ""}
+      ${d.meta_chat_history_tail ? `<h4>Meta-agent chat history (tail)</h4><pre class="code">${escapeHtml(d.meta_chat_history_tail)}</pre>` : ""}
+      <h4>Files</h4><div class="subtle small">${(d.files || []).join(" · ")}</div>`;
+    $("#gen-dialog").showModal();
+  } catch (e) { alert(`Could not load generation: ${e.message}`); }
+}
+
+async function refreshLineage(eid) {
+  const el = $("#lineage");
+  try {
+    const lin = await jfetch(`${API}/experiments/${eid}/lineage`);
+    if (!lin.nodes.length) { el.textContent = "—"; return; }
+    const byGen = {};
+    lin.nodes.forEach((n) => { byGen[n.gen] = { ...n, children: [] }; });
+    lin.nodes.forEach((n) => {
+      if (n.parent != null && byGen[String(n.parent)]) byGen[String(n.parent)].children.push(byGen[n.gen]);
+    });
+    const lines = [];
+    const walk = (node, depth) => {
+      const firstDomain = Object.entries(node.scores || {})[0];
+      const train = firstDomain ? fmt.score(firstDomain[1].train) : "—";
+      const dur = node.duration_s != null ? `${node.duration_s.toFixed(1)}s` : "";
+      const bad = node.parent_agent_success === false ? " ⚠ meta-failed" : "";
+      lines.push(`${"  ".repeat(depth)}└─ gen ${node.gen}  [train ${train}] ${dur}${bad}`);
+      node.children.forEach((c) => walk(c, depth + 1));
+    };
+    (lin.roots || []).forEach((r) => walk(byGen[r], 0));
+    el.textContent = lines.join("\n");
+  } catch (e) { el.textContent = `lineage unavailable: ${e.message}`; }
 }
 
 fmt.score = (v) => (v == null ? "—" : (100 * v).toFixed(1) + "%");
@@ -242,6 +349,8 @@ $("#btn-compare").onclick = async () => {
   const a = $("#cmp-a").value, b = $("#cmp-b").value;
   if (!a || !b) return;
   const data = await jfetch(`${API}/comparison?ids=${a},${b}`);
+  const row = (label, items, cell) =>
+    `<tr><td class="subtle">${label}</td>${items.map((c) => `<td>${cell(c)}</td>`).join("")}</tr>`;
   $("#compare-result").innerHTML = `<div class="card"><table>
     <thead><tr><th></th>${data.comparison.map((c) => `<th>${escapeHtml(c.name)}</th>`).join("")}</tr></thead>
     <tbody>
@@ -249,16 +358,18 @@ $("#btn-compare").onclick = async () => {
       ${row("Domains", data.comparison, (c) => (c.domains || []).join(", "))}
       ${row("Meta model", data.comparison, (c) => escapeHtml(c.meta_model || ""))}
       ${row("Task model", data.comparison, (c) => escapeHtml(c.task_model || ""))}
+      ${row("Generations", data.comparison, (c) => c.generation_stats?.count ?? 0)}
+      ${row("Best train score", data.comparison, (c) => fmt.score(Object.values(c.generation_stats?.best_train_scores || {})[0]))}
+      ${row("Avg gen time", data.comparison, (c) => c.generation_stats?.avg_generation_seconds != null ? c.generation_stats.avg_generation_seconds.toFixed(1) + "s" : "—")}
       ${row("Tokens", data.comparison, (c) => fmt.tokens(c.usage?.total_tokens))}
       ${row("Cost", data.comparison, (c) => fmt.money(c.usage?.cost_usd))}
-      ${row("Requests", data.comparison, (c) => c.usage?.requests ?? 0)}
-      ${row("Wallclock", data.comparison, (c) => fmt.time(c.finished_at || Date.now() / 1000 - (c.started_at || Date.now() / 1000)) )}
+      ${row("LLM calls", data.comparison, (c) => c.usage?.requests ?? 0)}
+      ${row("Wallclock", data.comparison, (c) =>
+        c.started_at && c.finished_at
+          ? `${((c.finished_at - c.started_at) / 60).toFixed(1)} min`
+          : c.started_at ? "running…" : "—")}
     </tbody></table></div>`;
 };
-
-function row(label, items, cell) {
-  return `<tr><td class="subtle">${label}</td>${items.map((c) => `<td>${cell(c)}</td>`).join("")}</tr>`;
-}
 
 /* ---------------- shell ---------------- */
 

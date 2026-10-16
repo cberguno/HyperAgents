@@ -78,6 +78,9 @@ def test_watcher_emits_events(store, bus, tmp_path):
     gen1 = [g for g in last if g["gen"] == "1"][0]
     assert gen1["scores"]["paper_review"]["train"] == pytest.approx(0.60)
     assert gen1["scores"]["paper_review"]["val"] == pytest.approx(0.55)
+    # execution speed: duration recorded against the previous generation
+    assert gen1["duration_s"] is not None and gen1["duration_s"] >= 0
+    assert gen1["completed_ts"] is not None
     # local usage ingested for reconciliation (separate from proxy ledger)
     assert store.usage_totals(exp["id"], source="local")["requests"] == 1
     types = [e["type"] for e in store.list_events(exp["id"])]

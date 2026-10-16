@@ -115,6 +115,20 @@ def test_comparison_enriched_with_generation_stats(client):
     assert gs["avg_generation_seconds"] == 84.2
 
 
+def test_generations_rest_endpoint_bootstraps_table(client, store):
+    """The dashboard bootstraps its generations table from this endpoint because
+    SSE replay windows can be dominated by llm_call bursts."""
+    eid = client.post("/api/experiments", json={"name": "gen-rest"}).json()["id"]
+    assert client.get(f"/api/experiments/{eid}/generations").json()["generations"] == []
+    store.add_event(eid, "generations", {"generations": [
+        {"gen": "initial", "parent": None, "duration_s": None, "scores": {"paper_review": {"train": 0.52}}},
+        {"gen": "1", "parent": "initial", "duration_s": 12.5, "scores": {"paper_review": {"train": 0.55}}},
+    ]})
+    gens = client.get(f"/api/experiments/{eid}/generations").json()["generations"]
+    assert [g["gen"] for g in gens] == ["initial", "1"]
+    assert gens[1]["duration_s"] == 12.5
+
+
 def test_usage_totals_include_latency(client):
     store = client.app.state.store
     eid = client.post("/api/experiments", json={"name": "lat"}).json()["id"]

@@ -489,6 +489,15 @@ def create_app(service: ServiceConfig | None = None) -> FastAPI:
             "total_generations": len(nodes),
         }
 
+    @app.get("/api/experiments/{exp_id}/generations")
+    def experiment_generations(exp_id: str):
+        """Latest per-generation summaries (REST; the SSE 'generations' event is
+        the live updater — the SSE replay window can be dominated by llm_call
+        bursts, so the dashboard bootstraps from this endpoint)."""
+        if not store.get_experiment(exp_id):
+            raise HTTPException(404, "experiment not found")
+        return {"generations": store.latest_generations(exp_id)}
+
     @app.get("/api/experiments/{exp_id}/generations/{gen}")
     def generation_detail(exp_id: str, gen: str):
         """One generation's history + memory: metadata, scores, the meta-agent's

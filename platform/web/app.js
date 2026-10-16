@@ -156,6 +156,12 @@ async function refreshDetail() {
   const e = await jfetch(`${API}/experiments/${state.selected}`);
   $("#detail-title").textContent = `${e.name} · ${e.id}`;
   renderControls(e);
+  // bootstrap the generations table via REST (SSE updates it live afterwards;
+  // the SSE replay window can be dominated by llm_call bursts)
+  try {
+    const gensData = await jfetch(`${API}/experiments/${e.id}/generations`);
+    if (gensData.generations.length) renderGenerations(gensData.generations);
+  } catch (_) { /* SSE will populate it */ }
   const genStats = await fetchGenStats(e.id);
   renderMetrics(e, genStats);
   refreshLineage(e.id);

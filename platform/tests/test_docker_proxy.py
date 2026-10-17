@@ -121,6 +121,15 @@ class FakeDockerDaemon:
                     payload = json.dumps([]).encode()
                     conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
                                  + f"Content-Length: {len(payload)}\r\n\r\n".encode() + payload)
+                elif "/start" in path_only and path_only.endswith("/start"):
+                    # mimic the real daemon: starting an ALREADY-RUNNING
+                    # container returns 304 Not Modified — no Content-Length,
+                    # no chunked framing, connection stays open (keep-alive).
+                    conn.sendall(b"HTTP/1.1 304 Not Modified\r\n\r\n")
+                elif path_only.endswith("/containers/abc123/json"):
+                    payload = json.dumps({"Id": "abc123", "State": {"Running": True}}).encode()
+                    conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                                 + f"Content-Length: {len(payload)}\r\n\r\n".encode() + payload)
                 else:
                     payload = json.dumps({"message": f"no route {path_only}"}).encode()
                     conn.sendall(b"HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\n"
@@ -320,3 +329,48 @@ def test_proxy_keeps_hijacked_streams_alive(fake_daemon, tmp_path):
             proxy.stop()
     finally:
         daemon.stop()
+
+
+def test_proxy_bodiless_304_keeps_connection_reusable(fake_daemon, tmp_path):
+    """Regression (run e0d7745dc1575 attempts 2+3): docker-py calls
+    container.start() after containers.run() already started the container;
+    the daemon replies 304 Not Modified — bodiless, no framing headers,
+    keep-alive. The proxy used to fall into read-until-upstream-closes,
+    parking the conversation thread forever; the client's NEXT request on the
+    same pooled connection was never forwarded and docker-py blocked until
+    read-timeout. Now: 204/304/1xx/HEAD forward the head and keep the
+    connection reusable."""
+    proxy = DockerEnvProxy(
+        env={"HACP_LLMBASE": "http://127.0.0.1:8420/proxy/v1"},
+        docker_socket=fake_daemon.sock_path,
+        socket_dir=str(tmp_path / "prox304"),
+    )
+    proxy.start()
+    try:
+        c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        c.settimeout(10)
+        c.connect(proxy.socket_path)
+
+        def roundtrip(raw: bytes) -> bytes:
+            c.sendall(raw)
+            buf = b""
+            while b"\r\n\r\n" not in buf:
+                data = c.recv(65536)
+                assert data, "connection closed before response head"
+                buf += data
+            return buf
+
+        # 1) a bodiless 304 (start on already-running container)
+        head = roundtrip(b"POST /containers/abc123/start HTTP/1.1\r\nHost: docker\r\n\r\n")
+        assert b"304" in head
+        # 2) the NEXT request on the SAME connection must be served promptly
+        #    (this is where the old proxy hung forever)
+        c.settimeout(5)
+        head2 = roundtrip(b"GET /containers/abc123/json HTTP/1.1\r\nHost: docker\r\n\r\n")
+        assert b"200" in head2
+        # 3) and a third, proving the loop stays alive
+        head3 = roundtrip(b"GET /_ping HTTP/1.1\r\nHost: docker\r\n\r\n")
+        assert b"200" in head3
+        c.close()
+    finally:
+        proxy.stop()

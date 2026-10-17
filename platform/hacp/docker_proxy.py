@@ -283,6 +283,24 @@ class DockerEnvProxy:
                 self._pump(client, upstream)
                 return
 
+            # Bodiless responses (204 No Content, 304 Not Modified, 1xx, and
+            # HEAD replies) carry no framing headers. The daemon keeps the
+            # connection alive, so we must NOT fall through to the
+            # read-until-upstream-closes branch: doing so parks this thread
+            # forever while the client (docker-py connection pooling) reuses
+            # the connection for its NEXT request — which then never gets
+            # forwarded and the client blocks awaiting a response. This
+            # exactly stalled POST /containers/<id>/start (upstream calls
+            # container.start() after containers.run() already started it) in
+            # run e0d7745dc1575 attempts 2 and 3.
+            if (
+                _status_code in ("204", "304")
+                or _status_code.startswith("1")
+                or method.upper() == "HEAD"
+            ):
+                client.sendall(rhead)
+                continue  # keep-alive: next request
+
             # response body framing
             if rheaders.get("transfer-encoding", "").lower() == "chunked":
                 client.sendall(rhead)

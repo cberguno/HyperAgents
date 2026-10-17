@@ -119,6 +119,12 @@ def _hacp_load_config():
 
 def _hacp_role():
     try:
+        # Explicit override first: the pre-session guard's probe runs as
+        # `python -c <src>` so argv cannot identify the caller; the guard sets
+        # HACP_PROBE_ROLE explicitly (real agent processes never set it).
+        _forced = _hacp_os.environ.get("HACP_PROBE_ROLE", "")
+        if _forced in ("meta", "task"):
+            return _forced
         _argv = " ".join(_hacp_sys.argv)
         if "run_meta_agent" in _argv:
             return "meta"

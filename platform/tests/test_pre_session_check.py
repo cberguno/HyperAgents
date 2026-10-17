@@ -1,4 +1,8 @@
 """Option C — pre-session routing check: probe command + guard decisions."""
+import json
+import shutil
+from pathlib import Path
+
 import pytest
 
 from hacp.runner import (
@@ -37,6 +41,55 @@ def test_probe_fails_cleanly_without_instrumentation():
     assert not ok and "HACP-NO-PATCH" in detail
 
 
+def test_probe_honors_probe_role_env():
+    """The guard probe runs as `python -c`, so argv role detection can't fire;
+    HACP_PROBE_ROLE=meta makes the loader treat the probe as the meta agent —
+    without this every real container would fail the pre-session check."""
+    import os
+    import subprocess
+    import sys
+
+    from hacp.workspace import prepare_workspace
+    from tests.conftest import PLATFORM_DIR
+
+    tmp = Path(os.environ.get("HACP_TEST_TMP", "/tmp"))
+    ws = tmp / f"probe-ws-{os.getpid()}"
+    if ws.exists():
+        shutil.rmtree(ws)
+    (ws / "agent").mkdir(parents=True)
+    shutil.copy(PLATFORM_DIR.parent / "agent" / "llm.py", ws / "agent" / "llm.py")
+    from hacp.instrumentation import apply_instrumentation
+
+    apply_instrumentation(ws)
+    (ws / "platform_config.json").write_text(json.dumps({
+        "experiment_id": "eProbe",
+        "llm_api_base": "http://127.0.0.1:1/proxy/v1",
+        "meta_model": "openai/gpt-6-luna",
+        "meta_token": "t",
+        "usage_log": "misc/hacp/usage.jsonl",
+    }))
+    env = dict(os.environ)
+    env.update({
+        "HACP_PROBE_ROLE": "meta",
+        "HACP_LLMBASE": "http://127.0.0.1:1/proxy/v1",
+        "HACP_META_MODEL": "openai/gpt-6-luna",
+    })
+    code = (
+        "import sys, os\n"
+        "sys.path.insert(0, %r)\n"
+        "os.chdir(%r)\n"
+        "from agent import llm as L\n"
+        "assert L._hacp_role() == 'meta', L._hacp_role()\n"
+        "o, e = L._hacp_before_completion('openai/gpt-4o')\n"
+        "assert o == 'openai/openai/gpt-6-luna', o\n"
+        "assert e['api_base'] == 'http://127.0.0.1:1/proxy/v1'\n"
+        "print('PROBE-ROLE-OK')\n" % (str(ws), str(ws))
+    )
+    r = subprocess.run([sys.executable, "-c", code], env=env,
+                       capture_output=True, text=True, timeout=120)
+    assert "PROBE-ROLE-OK" in r.stdout, r.stdout + r.stderr
+
+
 def test_evaluate_probe_matrix():
     ok, detail = evaluate_routing_probe(0, "HACP-OK\n")
     assert ok and "HACP-OK" in detail
@@ -65,10 +118,13 @@ def test_guard_once_fails_run_on_inactive(monkeypatch):
     class FakeContainer:
         name = "hyperagents-gl-container-runx"
 
-        def exec_run(self, cmd, workdir=None):
+        def exec_run(self, cmd, workdir=None, environment=None):
+            assert environment == {"HACP_PROBE_ROLE": "meta"}, (
+                "guard must pass the probe-role env to the container exec"
+            )
             class R:
                 exit_code = 3
-                output = b"HACP-INACTIVE\n"
+                output = b"HACP-INACTIVE (routing_active false)\n"
 
             return R()
 
@@ -93,10 +149,11 @@ def test_guard_once_passes_on_active(monkeypatch):
     class FakeContainer:
         name = "hyperagents-gl-container-runy"
 
-        def exec_run(self, cmd, workdir=None):
+        def exec_run(self, cmd, workdir=None, environment=None):
+            assert environment == {"HACP_PROBE_ROLE": "meta"}
             class R:
                 exit_code = 0
-                output = b"HACP-OK\n"
+                output = b"HACP-OK role=meta model=openai/gpt-6-luna\n"
 
             return R()
 
@@ -129,7 +186,8 @@ def test_guard_container_loop_fails_the_run(monkeypatch):
             self.id = "cid1"
             self.status = "running"
 
-        def exec_run(self, cmd, workdir=None):
+        def exec_run(self, cmd, workdir=None, environment=None):
+            assert environment == {"HACP_PROBE_ROLE": "meta"}
             class R:
                 exit_code = 3
                 output = b"HACP-NO-PATCH\n"

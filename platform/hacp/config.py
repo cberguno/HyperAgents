@@ -52,8 +52,8 @@ _PRICING: dict[str, tuple[str, float, float, str]] = {
     "gemini/gemini-3-pro-preview": ("google", 2.00, 12.00, "Gemini 3 Pro (preview)"),
     # --- Zhipu AI (GLM) — prices from OpenRouter /models (2026-10-16) ---
     "z-ai/glm-5.3": ("z-ai", 0.00, 5.00, "GLM 5.3"),
-    # --- DeepSeek — prices from OpenRouter /models (2026-10-16) ---
-    "deepseek/deepseek-v4.1-flash": ("deepseek", 0.00, 1.00, "DeepSeek v4.1 Flash"),
+    # --- DeepSeek — prices from OpenRouter /models (updated 2026-10-17: 0.15/0.60) ---
+    "deepseek/deepseek-v4.1-flash": ("deepseek", 0.15, 0.60, "DeepSeek v4.1 Flash"),
     # --- OpenAI GPT-6 Luna — price from OpenRouter /models (2026-10-16) ---
     "openai/gpt-6-luna": ("openai", 0.10, 0.50, "GPT-6 Luna"),
     "openai/gpt-6-luna-pro": ("openai", 0.10, 0.50, "GPT-6 Luna Pro"),

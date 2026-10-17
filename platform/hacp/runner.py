@@ -43,12 +43,23 @@ STARTABLE = {"created", "paused", "stopped", "paused_budget", "failed", "finishe
 #   0 -> routing active (instrumented + env-based config + proxy reachable)
 #   3 -> routing NOT active (agent de-instrumented its lineage, or no env)
 ROUTING_PROBE = '''
-import os, sys, urllib.request
+import os, sys, threading, time, urllib.request
+# keepalive: importing agent.llm pulls in litellm (cold import can exceed
+# docker-py's 60s read timeout); emit traffic so the exec socket never goes
+# silent. Unbuffered via `python -u`.
+_ka_stop = threading.Event()
+def _keepalive():
+    while not _ka_stop.wait(5.0):
+        try: sys.stdout.write("."); sys.stdout.flush()
+        except Exception: pass
+threading.Thread(target=_keepalive, daemon=True).start()
 sys.path.insert(0, "/hyperagents")
 try:
     from agent import llm as L
 except Exception as e:
     print("HACP-NO-LLM %s" % e); sys.exit(3)
+finally:
+    _ka_stop.set()
 f = getattr(L, "_hacp_before_completion", None)
 if f is None:
     print("HACP-NO-PATCH"); sys.exit(3)
@@ -62,8 +73,6 @@ if not L._hacp_routing_active():
 _override, _extra = f("openai/gpt-4o")
 if not _override or not _extra.get("api_base"):
     print("HACP-INACTIVE (no meta override)"); sys.exit(3)
-if not _override.endswith(os.environ.get("HACP_PROBE_EXPECT_MODEL", _override.rsplit("/", 1)[0])):
-    pass  # informational only
 base = os.environ.get("HACP_LLMBASE", "").rsplit("/proxy/v1", 1)[0]
 if not base:
     print("HACP-NO-ENV"); sys.exit(3)
@@ -78,12 +87,8 @@ print("HACP-OK role=%s model=%s" % (_role, _override)); sys.exit(0)
 def build_probe_command() -> list:
     # NOTE: HACP_PROBE_ROLE is set by the guard's container exec env; the
     # loader reads it so routing checks work in probe processes (whose argv
-    # cannot indicate a role).
-    return ["python", "-c", ROUTING_PROBE]
-
-
-def build_probe_command() -> list:
-    return ["python", "-c", ROUTING_PROBE]
+    # cannot indicate a role). -u: unbuffered so keepalive dots actually flow.
+    return ["python", "-u", "-c", ROUTING_PROBE]
 
 
 def evaluate_routing_probe(exit_code, output="") -> tuple:

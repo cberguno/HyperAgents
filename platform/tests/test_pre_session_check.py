@@ -14,8 +14,8 @@ from hacp.runner import (
 
 def test_probe_command_structure():
     cmd = build_probe_command()
-    assert cmd[0] == "python" and cmd[1] == "-c"
-    src = cmd[2]
+    assert cmd[0] == "python" and cmd[1] == "-u" and cmd[2] == "-c"
+    src = cmd[3]
     # the probe checks: instrumented llm module, routing active, env config,
     # and live reachability of the platform proxy — inside /hyperagents
     assert "/hyperagents" in src

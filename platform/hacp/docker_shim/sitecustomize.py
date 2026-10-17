@@ -30,6 +30,11 @@ if _PROXY_URL:
             # explicit base_url callers (tests, guards) are left untouched
             if not args and not kwargs.get("base_url"):
                 kwargs["base_url"] = _PROXY_URL
+            # docker-py's default 60s read timeout is too short for a daemon
+            # serving 17GB-image containers (observed ReadTimeout on
+            # /containers/<id>/start in run e0d7745dc1575 attempt 2); the
+            # proxy adds no meaningful latency but the daemon can.
+            kwargs.setdefault("timeout", 900)
             _orig_init(self, *args, **kwargs)
 
         _docker.DockerClient.__init__ = _hacp_init

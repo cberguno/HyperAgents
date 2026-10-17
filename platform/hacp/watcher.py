@@ -204,6 +204,7 @@ class ExperimentWatcher(threading.Thread):
                 status="ok",
                 source="local",
                 ts=entry.get("ts"),
+                cached_tokens=int(entry.get("cached_tokens") or 0),
             )
         if lines:
             local = self.store.usage_totals(self.exp_id, source="local")

@@ -288,6 +288,24 @@ class ServiceConfig(BaseModel):
     initial_slots: int = Field(default=5, ge=1, le=100)
     shell_model: str = "openai/gpt-4o-mini"
     shell_max_tool_calls: int = 8
+    # Shell context management (the platform's own coding-agent orchestration;
+    # the HyperAgents experimental runtime is NEVER compacted or truncated).
+    shell_context_tokens: int = Field(
+        default=24000, ge=2000, le=200_000,
+        description="Compact the shell conversation around this many estimated tokens.",
+    )
+    shell_recent_turns: int = Field(
+        default=6, ge=2, le=40,
+        description="Recent (user/assistant) turns always kept during compaction.",
+    )
+    shell_session_max_tokens: Optional[int] = Field(
+        default=None, ge=1000,
+        description="Per-shell-conversation token budget (estimated); the shell answers a stop notice when reached.",
+    )
+    shell_session_max_cost_usd: Optional[float] = Field(
+        default=None, gt=0,
+        description="Per-shell-conversation dollar budget (estimated from registry prices).",
+    )
     # Filled at runtime (host the in-container LLM calls reach via host networking):
     proxy_public_base: str = ""  # e.g. http://127.0.0.1:8420 — where the proxy listens
     enforce_models: bool = False
@@ -301,6 +319,14 @@ class ServiceConfig(BaseModel):
             upstream=os.environ.get("HACP_UPSTREAM", "stub"),
             upstream_repo=os.environ.get("HACP_UPSTREAM_REPO", ""),
             shell_model=os.environ.get("HACP_SHELL_MODEL", "openai/gpt-4o-mini"),
+            shell_context_tokens=int(os.environ.get("HACP_SHELL_CONTEXT_TOKENS", "24000") or 24000),
+            shell_recent_turns=int(os.environ.get("HACP_SHELL_RECENT_TURNS", "6") or 6),
+            shell_session_max_tokens=(
+                int(v) if (v := os.environ.get("HACP_SHELL_SESSION_MAX_TOKENS", "").strip()) else None
+            ),
+            shell_session_max_cost_usd=(
+                float(v) if (v := os.environ.get("HACP_SHELL_SESSION_MAX_COST_USD", "").strip()) else None
+            ),
         )
         if not cfg.upstream_repo:
             from .paths import upstream_repo_default

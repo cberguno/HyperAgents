@@ -5,9 +5,14 @@ scores, usage/cost, logs, failure context). Control actions (start/pause/stop)
 are intentionally *not* auto-executed by the shell — it returns the exact API
 call instead (full control integration is M4).
 
-The shell's model is configured independently of experiment models
-(ServiceConfig.shell_model), routes through the platform proxy, and its usage
-is accounted in the same ledger (role='shell').
+Context management (the platform's own agent — NOT the HyperAgents
+experimental runtime, which is never compacted or truncated):
+- tool results are capped inline and deduplicated (identical consecutive
+  results elided)
+- the conversation is compacted around ``shell_context_tokens`` estimated
+  tokens, always preserving the first user message (original intent), the
+  most recent turns, and an explicit note about what was omitted
+- optional per-conversation token/dollar budgets stop the session gracefully
 """
 from __future__ import annotations
 
@@ -17,7 +22,58 @@ from pathlib import Path
 from typing import Callable
 
 from . import paths
+from .config import resolve_model
 from .store import Store
+
+TOOL_RESULT_CAP_CHARS = 6000  # inline cap for tool results in the conversation
+
+
+def _est_tokens(text: str) -> int:
+    return len(text) // 4 + 8
+
+
+def _history_tokens(messages: list[dict]) -> int:
+    return sum(_est_tokens(str(m.get("content", ""))) for m in messages)
+
+
+def compact_shell_history(history: list[dict], context_tokens: int, recent_turns: int,
+                          incoming: str = "") -> tuple[list[dict], bool]:
+    """Compact a shell conversation around an estimated-token budget.
+
+    Preserves: the FIRST user message (the original task, annotated with what
+    was omitted), and the last ``recent_turns`` messages (current state and
+    unresolved tool results). Middle turns are dropped with an explicit note;
+    nothing is silently lost. Returns (history, compacted?).
+    """
+    pending = _est_tokens(incoming)
+    if _history_tokens(history) + pending <= context_tokens:
+        return history, False
+    if len(history) <= recent_turns + 1:
+        return history, False  # nothing safely droppable
+    first = dict(history[0])
+    tail = list(history[-recent_turns:])
+    dropped = history[1:-recent_turns]
+    note = (
+        "[context note] %d earlier messages were compacted to stay within the "
+        "context budget. Earlier tool results are no longer inline; ask again "
+        "if you need any of them re-run. The original request is preserved "
+        "above." % len(dropped)
+    )
+    first["content"] = str(first.get("content", "")) + "\n\n" + note
+    return [first] + tail, True
+
+
+def dedupe_history(history: list[dict]) -> list[dict]:
+    """Elide consecutive identical tool-result messages (repeat calls)."""
+    out = []
+    prev = None
+    for m in history:
+        content = str(m.get("content", ""))
+        if prev is not None and content == prev and "Tool result (JSON):" in content:
+            continue  # identical consecutive tool result: skip the duplicate
+        out.append(m)
+        prev = content
+    return out
 
 TOOL_PROMPT = """You are the assistant shell of the HyperAgents Control Platform.
 You can inspect experiments and explain what is happening. You have these tools:
@@ -168,26 +224,89 @@ def build_tools(store: Store, home: Path):
 
 
 class ShellAgent:
-    def __init__(self, client, store: Store, home: Path, max_tool_calls: int = 8):
+    def __init__(self, client, store: Store, home: Path, max_tool_calls: int = 8,
+                 context_tokens: int = 24000, recent_turns: int = 6,
+                 session_max_tokens: int | None = None,
+                 session_max_cost_usd: float | None = None,
+                 model: str = "openai/gpt-4o-mini"):
         self.client = client
         self.store = store
         self.home = home
         self.max_tool_calls = max_tool_calls
+        self.context_tokens = context_tokens
+        self.recent_turns = recent_turns
+        self.session_max_tokens = session_max_tokens
+        self.session_max_cost_usd = session_max_cost_usd
+        self.model = model
+        self.session_tokens = 0       # estimated per-conversation spend
+        self.session_cost_usd = 0.0
         self.tools = {t["name"]: t for t in build_tools(store, home)}
+
+    def _budget_note(self, kind: str) -> str:
+        return (
+            f"[session budget] The shell conversation's {kind} limit was reached "
+            f"(tokens est. {self.session_tokens:,}, "
+            f"cost est. ${self.session_cost_usd:.4f}). "
+            "Start a new shell conversation to continue."
+        )
+
+    def _account(self, messages, reply: str):
+        """Accumulate estimated session spend — from the client's reported usage
+        when available, else from message sizes. The proxy ledger remains the
+        authoritative accounting; this only drives graceful session stops."""
+        usage = getattr(self.client, "last_usage", None)
+        if isinstance(usage, dict) and usage.get("total_tokens"):
+            self.session_tokens += int(usage["total_tokens"])
+            info = resolve_model(str(usage.get("model") or self.model))
+            self.session_cost_usd += (
+                int(usage.get("prompt_tokens") or 0) / 1e6 * info.input_usd_per_mtok
+                + int(usage.get("completion_tokens") or 0) / 1e6 * info.output_usd_per_mtok
+            )
+        else:
+            est = _history_tokens(messages) + _est_tokens(reply)
+            self.session_tokens += est
+            info = resolve_model(self.model)
+            self.session_cost_usd += (
+                est / 2 / 1e6 * info.input_usd_per_mtok
+                + est / 2 / 1e6 * info.output_usd_per_mtok
+            )
 
     def run(self, message: str, history: list[dict] | None = None) -> dict:
         """One conversational turn. Returns reply + transcript + tool calls made."""
-        messages = list(history or [])
+        # session budgets are checked BEFORE spending more
+        if self.session_max_tokens and self.session_tokens >= self.session_max_tokens:
+            return {"reply": self._budget_note("token"), "tool_calls": [],
+                    "history": list(history or []), "budget_stopped": True}
+        if self.session_max_cost_usd and self.session_cost_usd >= self.session_max_cost_usd:
+            return {"reply": self._budget_note("cost"), "tool_calls": [],
+                    "history": list(history or []), "budget_stopped": True}
+
+        messages = dedupe_history(list(history or []))
         system = TOOL_PROMPT.format(
             tools="\n".join(
                 f"- {t['name']}: {t['description']}" for t in self.tools.values()
             )
         )
+        compacted, _ = compact_shell_history(messages, self.context_tokens,
+                                              self.recent_turns, incoming=message)
+        messages = compacted
         messages = [{"role": "system", "content": system}, *messages,
                    {"role": "user", "content": message}]
         tool_calls_made = []
         for _ in range(self.max_tool_calls + 1):
             reply = self.client.chat(messages)
+            self._account(messages, reply)
+            # mid-session budget guard (after a completed call)
+            if self.session_max_tokens and self.session_tokens >= self.session_max_tokens:
+                messages.append({"role": "assistant", "content": reply})
+                return {"reply": reply + "\n\n" + self._budget_note("token"),
+                        "tool_calls": tool_calls_made,
+                        "history": messages[1:], "budget_stopped": True}
+            if self.session_max_cost_usd and self.session_cost_usd >= self.session_max_cost_usd:
+                messages.append({"role": "assistant", "content": reply})
+                return {"reply": reply + "\n\n" + self._budget_note("cost"),
+                        "tool_calls": tool_calls_made,
+                        "history": messages[1:], "budget_stopped": True}
             match = re.search(r"<json>\s*(\{.*?\})\s*</json>", reply, re.DOTALL)
             if not match:
                 return {"reply": reply, "tool_calls": tool_calls_made,
@@ -211,11 +330,18 @@ class ShellAgent:
                 except Exception as e:
                     result = {"error": str(e)}
             tool_calls_made.append({"tool_name": name, "tool_input": inp, "result": result})
+            # keep the shell's own context lean: cap large results inline (the
+            # full result stays in tool_calls_made for the UI) and elide repeats
+            result_str = json.dumps(result, default=str)
+            if len(result_str) > TOOL_RESULT_CAP_CHARS:
+                result_str = result_str[:TOOL_RESULT_CAP_CHARS] + (
+                    f"... [truncated {len(result_str) - TOOL_RESULT_CAP_CHARS} chars; "
+                    "ask for specifics]"
+                )
             messages.append({"role": "assistant", "content": reply})
             messages.append({
                 "role": "user",
-                "content": "Tool result (JSON):\n```json\n"
-                            + json.dumps(result, default=str)[:6000] + "\n```",
+                "content": "Tool result (JSON):\n```json\n" + result_str + "\n```",
             })
         return {
             "reply": "Tool call limit reached without a final answer.",

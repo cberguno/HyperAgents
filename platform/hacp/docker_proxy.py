@@ -123,6 +123,7 @@ class DockerEnvProxy:
         self._sock_path: Optional[str] = None
         self._server: Optional[socket.socket] = None
         self._lock = threading.Lock()
+        self._stopped = threading.Event()
 
     # -- lifecycle ------------------------------------------------------------
     def start(self) -> str:
@@ -130,7 +131,13 @@ class DockerEnvProxy:
             os.environ.get("HACP_HOME", str(Path.home()))
         ) / "docker-proxies"
         base.mkdir(parents=True, exist_ok=True)
-        self._sock_path = str(base / f"hacp-docker-{os.getpid()}-{int(time.time() * 1000)}.sock")
+        # AF_UNIX paths are capped at ~108 chars: keep the name short
+        name = f"hacp-{os.getpid()}-{int(time.time() * 1000)}.sock"
+        path = str(base / name)
+        if len(path) > 104:  # guard: fall back to /tmp
+            path = f"/tmp/{name}"
+            Path("/tmp").mkdir(exist_ok=True)
+        self._sock_path = path
         srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         srv.bind(self._sock_path)
         os.chmod(self._sock_path, 0o660)
@@ -143,6 +150,7 @@ class DockerEnvProxy:
         return self._sock_path
 
     def stop(self):
+        self._stopped.set()
         with self._lock:
             srv, self._server = self._server, None
         if srv is not None:

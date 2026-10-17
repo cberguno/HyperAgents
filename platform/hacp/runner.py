@@ -131,6 +131,7 @@ class ExperimentRunner:
             "HACP_META_COMPLETION": str(cfg.meta_completion_cap or ""),
             "HACP_TASK_COMPLETION": str(cfg.task_completion_cap or ""),
             "HACP_ROUTING_ACTIVE": "1",
+            # context manager (per-task budgets; empty = platform defaults)
         }
 
     def _workspace(self, exp_id: str) -> Path:
@@ -258,9 +259,11 @@ class ExperimentRunner:
             # redirects the no-arg construction to the proxy socket.
             from .docker_proxy import DockerEnvProxy
 
+            # NOTE: AF_UNIX paths are capped at ~108 chars; the experiment
+            # directory is too deep — use a short /tmp path (per-experiment name)
             proxy = DockerEnvProxy(
                 env=hacp_env,
-                socket_dir=str(self._exp_dir(exp_id)),
+                socket_dir="/tmp",
             )
             sock_path = proxy.start()
             with self._lock:

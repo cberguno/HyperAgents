@@ -18,13 +18,18 @@ class LLMClient(Protocol):
 
 
 class ProxyLLMClient:
-    """Synchronous client for the platform's OpenAI-compatible proxy."""
+    """Synchronous client for the platform's OpenAI-compatible proxy.
+
+    Exposes ``last_usage`` after each call so platform-side agents (the shell)
+    can track their session spend without touching the authoritative ledger.
+    """
 
     def __init__(self, proxy_v1_base: str, token: str, default_model: str, timeout: float = 120.0):
         self.base = proxy_v1_base.rstrip("/")
         self.token = token
         self.default_model = default_model
         self.timeout = timeout
+        self.last_usage: dict | None = None
 
     def chat(self, messages: list[dict], model: Optional[str] = None,
              temperature: float = 0.2, max_tokens: int = 4096) -> str:
@@ -47,6 +52,7 @@ class ProxyLLMClient:
                 detail = resp.text
             raise RuntimeError(f"LLM proxy error {resp.status_code}: {detail}")
         body = resp.json()
+        self.last_usage = body.get("usage") or None
         return body["choices"][0]["message"]["content"]
 
 

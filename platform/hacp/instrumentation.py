@@ -57,6 +57,7 @@ import time as _hacp_time
 _HACP_CFG = None
 _HACP_CFG_LOADED = False
 _HACP_CFG_LOCK = _hacp_threading.Lock()
+_hacp_state = _hacp_threading.local()
 
 # Environment variables injected by the platform into experiment containers
 # (via the Docker socket proxy). File operations cannot remove them, so this
@@ -192,6 +193,17 @@ def _hacp_usage_value(_usage, _key):
     return _v
 
 
+def _hacp_cached_tokens(_usage):
+    try:
+        _d = _usage.get("prompt_tokens_details") or {}
+        _v = _d.get("cached_tokens")
+        if _v is None:
+            _v = _usage.get("cache_read_input_tokens")
+        return int(_v or 0)
+    except Exception:
+        return 0
+
+
 def _hacp_log_usage(model, response, latency_s):
     try:
         _cfg = _hacp_load_config()
@@ -210,8 +222,19 @@ def _hacp_log_usage(model, response, latency_s):
             "prompt_tokens": _hacp_usage_value(_usage, "prompt_tokens"),
             "completion_tokens": _hacp_usage_value(_usage, "completion_tokens"),
             "total_tokens": _hacp_usage_value(_usage, "total_tokens"),
+            "cached_tokens": _hacp_cached_tokens(_usage),
             "latency_s": round(float(latency_s), 4),
         }
+        try:
+            _hacp_state.last_usage = {
+                "model": model,
+                "prompt_tokens": _entry["prompt_tokens"],
+                "completion_tokens": _entry["completion_tokens"],
+                "total_tokens": _entry["total_tokens"],
+                "cached_tokens": _entry["cached_tokens"],
+            }
+        except Exception:
+            pass
         _path = _cfg["usage_log"]
         if not _hacp_os.path.isabs(_path):
             _path = _hacp_os.path.join(_hacp_os.getcwd(), _path)

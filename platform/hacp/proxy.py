@@ -150,6 +150,8 @@ class StubUpstream:
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "total_tokens": prompt_tokens + completion_tokens,
+                # exercise the platform's cached-token accounting path offline
+                "prompt_tokens_details": {"cached_tokens": min(prompt_tokens, 40)},
             },
         }
         # tiny sleep so latency accounting has signal
@@ -346,10 +348,15 @@ def create_proxy_router(store: Store, bus, service: ServiceConfig) -> APIRouter:
             usage = body.get("usage") or {}
             pt = int(usage.get("prompt_tokens") or 0)
             ct = int(usage.get("completion_tokens") or 0)
+            # cached input tokens (provider prompt caching): OpenAI-style
+            # usage.prompt_tokens_details.cached_tokens or Anthropic-style
+            # cache_read_input_tokens
+            details = usage.get("prompt_tokens_details") or {}
+            cached = int(details.get("cached_tokens") or usage.get("cache_read_input_tokens") or 0)
             store.add_usage(
                 exp_id, role, model, pt, ct,
                 latency_s=round(latency, 4), source="proxy",
-                generation=generation,
+                generation=generation, cached_tokens=cached,
             )
             bus.publish(
                 exp_id,
@@ -359,6 +366,7 @@ def create_proxy_router(store: Store, bus, service: ServiceConfig) -> APIRouter:
                     "model": model,
                     "prompt_tokens": pt,
                     "completion_tokens": ct,
+                    "cached_tokens": cached,
                     "latency_s": round(latency, 4),
                     "known_pricing": info.known_pricing,
                     "generation": generation,

@@ -46,8 +46,15 @@ def create_app(service: ServiceConfig | None = None) -> FastAPI:
     shell_client = ProxyLLMClient(
         service.proxy_v1_base, PLATFORM_TOKEN, service.shell_model
     )
-    shell = ShellAgent(shell_client, store, Path(service.home),
-                       max_tool_calls=service.shell_max_tool_calls)
+    shell = ShellAgent(
+        shell_client, store, Path(service.home),
+        max_tool_calls=service.shell_max_tool_calls,
+        context_tokens=service.shell_context_tokens,
+        recent_turns=service.shell_recent_turns,
+        session_max_tokens=service.shell_session_max_tokens,
+        session_max_cost_usd=service.shell_session_max_cost_usd,
+        model=service.shell_model,
+    )
 
     app.state.service = service
     app.state.store = store

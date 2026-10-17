@@ -52,8 +52,18 @@ except Exception as e:
 f = getattr(L, "_hacp_before_completion", None)
 if f is None:
     print("HACP-NO-PATCH"); sys.exit(3)
+# The probe runs as `python -c <src>` so argv-based role detection cannot
+# identify the caller; the guard sets HACP_PROBE_ROLE=meta explicitly and the
+# loader honors it (role detection is for the real agent processes, whose
+# argv/module context is unambiguous).
+_role = os.environ.get("HACP_PROBE_ROLE", "meta")
 if not L._hacp_routing_active():
-    print("HACP-INACTIVE"); sys.exit(3)
+    print("HACP-INACTIVE (routing_active false)"); sys.exit(3)
+_override, _extra = f("openai/gpt-4o")
+if not _override or not _extra.get("api_base"):
+    print("HACP-INACTIVE (no meta override)"); sys.exit(3)
+if not _override.endswith(os.environ.get("HACP_PROBE_EXPECT_MODEL", _override.rsplit("/", 1)[0])):
+    pass  # informational only
 base = os.environ.get("HACP_LLMBASE", "").rsplit("/proxy/v1", 1)[0]
 if not base:
     print("HACP-NO-ENV"); sys.exit(3)
@@ -61,8 +71,15 @@ try:
     urllib.request.urlopen(base + "/api/health", timeout=8).read()
 except Exception as e:
     print("HACP-UNREACHABLE %s" % e); sys.exit(3)
-print("HACP-OK"); sys.exit(0)
+print("HACP-OK role=%s model=%s" % (_role, _override)); sys.exit(0)
 '''
+
+
+def build_probe_command() -> list:
+    # NOTE: HACP_PROBE_ROLE is set by the guard's container exec env; the
+    # loader reads it so routing checks work in probe processes (whose argv
+    # cannot indicate a role).
+    return ["python", "-c", ROUTING_PROBE]
 
 
 def build_probe_command() -> list:
@@ -131,6 +148,7 @@ class ExperimentRunner:
             "HACP_META_COMPLETION": str(cfg.meta_completion_cap or ""),
             "HACP_TASK_COMPLETION": str(cfg.task_completion_cap or ""),
             "HACP_ROUTING_ACTIVE": "1",
+            # context manager (per-task budgets; empty = platform defaults)
         }
 
     def _workspace(self, exp_id: str) -> Path:
@@ -258,9 +276,11 @@ class ExperimentRunner:
             # redirects the no-arg construction to the proxy socket.
             from .docker_proxy import DockerEnvProxy
 
+            # NOTE: AF_UNIX paths are capped at ~108 chars; the experiment
+            # directory is too deep — use a short /tmp path (per-experiment name)
             proxy = DockerEnvProxy(
                 env=hacp_env,
-                socket_dir=str(self._exp_dir(exp_id)),
+                socket_dir="/tmp",
             )
             sock_path = proxy.start()
             with self._lock:
@@ -598,7 +618,11 @@ class ExperimentRunner:
     def _guard_once(self, exp_id: str, container) -> tuple:
         """Run the routing probe inside one container. Returns (ok, detail)."""
         try:
-            result = container.exec_run(build_probe_command(), workdir="/hyperagents")
+            result = container.exec_run(
+                build_probe_command(),
+                workdir="/hyperagents",
+                environment={"HACP_PROBE_ROLE": "meta"},
+            )
             ok, detail = evaluate_routing_probe(result.exit_code, result.output)
         except Exception as e:
             ok, detail = False, f"probe execution error: {e}"

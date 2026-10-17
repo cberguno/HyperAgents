@@ -89,7 +89,8 @@ class Store:
                 latency_s REAL,
                 status TEXT DEFAULT 'ok',
                 source TEXT DEFAULT 'proxy',
-                generation TEXT
+                generation TEXT,
+                cached_tokens INTEGER DEFAULT 0
             )"""
         )
         cur.execute(
@@ -113,6 +114,8 @@ class Store:
             cols = {r[1] for r in self._conn.execute("PRAGMA table_info(usage)")}
             if "generation" not in cols:
                 self._conn.execute("ALTER TABLE usage ADD COLUMN generation TEXT")
+            if "cached_tokens" not in cols:
+                self._conn.execute("ALTER TABLE usage ADD COLUMN cached_tokens INTEGER DEFAULT 0")
             self._conn.commit()
 
     # -- helpers -----------------------------------------------------------
@@ -235,6 +238,7 @@ class Store:
         source: str = "proxy",
         ts: float | None = None,
         generation: Optional[str] = None,
+        cached_tokens: int = 0,
     ) -> dict:
         total = total_tokens if total_tokens is not None else (prompt_tokens + completion_tokens)
         if cost_usd is None:
@@ -252,15 +256,16 @@ class Store:
             "status": status,
             "source": source,
             "generation": generation,
+            "cached_tokens": int(cached_tokens or 0),
         }
         with self._lock:
             self._conn.execute(
                 """INSERT INTO usage
                    (experiment_id, ts, role, model, prompt_tokens, completion_tokens,
-                    total_tokens, cost_usd, latency_s, status, source, generation)
+                    total_tokens, cost_usd, latency_s, status, source, generation, cached_tokens)
                    VALUES (:experiment_id, :ts, :role, :model, :prompt_tokens,
                            :completion_tokens, :total_tokens, :cost_usd, :latency_s,
-                           :status, :source, :generation)""",
+                           :status, :source, :generation, :cached_tokens)""",
                 row,
             )
             self._conn.commit()
@@ -272,6 +277,7 @@ class Store:
         q = (
             "SELECT COALESCE(SUM(prompt_tokens),0) p, COALESCE(SUM(completion_tokens),0) c, "
             "COALESCE(SUM(total_tokens),0) t, COALESCE(SUM(cost_usd),0) cost, COUNT(*) n, "
+            "COALESCE(SUM(cached_tokens),0) cached, "
             "AVG(latency_s) avg_latency, "
             "SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) errors, "
             "SUM(CASE WHEN status='blocked' THEN 1 ELSE 0 END) blocked "
@@ -302,6 +308,8 @@ class Store:
             "total_tokens": r["t"],
             "cost_usd": round(r["cost"], 6),
             "requests": r["n"],
+            "cached_tokens": r["cached"],
+            "uncached_tokens": r["p"] - r["cached"],
             "avg_latency_s": round(r["avg_latency"], 4) if r["avg_latency"] is not None else None,
             "errors": er["e"] or 0,
             "blocked": er["b"] or 0,

@@ -212,6 +212,23 @@ def test_sitecustomize_shim_inert_without_env(tmp_path):
     assert "INERT-OK" in r.stdout, r.stdout + r.stderr
 
 
+def test_short_socket_path_fallback(tmp_path):
+    """AF_UNIX caps paths at ~108 chars: a too-deep socket_dir falls back to
+    /tmp so upstream's docker client can connect (found in run 2: the
+    experiment dir made the proxy socket path too long -> AF_UNIX path too
+    long)."""
+    deep = tmp_path / ("a" * 40) / ("b" * 40) / ("c" * 40)
+    proxy = DockerEnvProxy(env={}, socket_dir=str(deep))
+    sock = proxy.start()
+    try:
+        assert len(sock) <= 104, len(sock)
+        assert sock.startswith("/tmp/hacp-")
+        assert Path(sock).exists()
+    finally:
+        proxy.stop()
+    assert not Path(sock).exists()
+
+
 def test_proxy_injects_env_into_container_creates(tmp_path, fake_daemon):
     proxy = DockerEnvProxy(
         env={"HACP_LLMBASE": "http://127.0.0.1:8420/proxy/v1",

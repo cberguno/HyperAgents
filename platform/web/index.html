@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HyperAgents Control Platform</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="logo">λ</span> HyperAgents <span class="accent">Control Platform</span></div>
+    <div class="topbar-status">
+      <span id="upstream-badge" class="badge" title="LLM upstream mode">…</span>
+      <span id="slots-count" class="badge subtle"></span>
+    </div>
+  </header>
+
+  <main>
+    <section id="slots-panel">
+      <div class="section-head">
+        <h2>Experiment slots</h2>
+        <button id="btn-expand" class="btn" title="Add another slot">+ Add slot</button>
+      </div>
+      <div id="slots" class="slots-grid"></div>
+    </section>
+
+    <section id="detail-panel" class="hidden">
+      <div class="section-head">
+        <h2 id="detail-title">Experiment</h2>
+        <button id="btn-back" class="btn ghost">← Back to slots</button>
+      </div>
+      <div id="detail-controls" class="detail-controls"></div>
+      <div class="detail-grid">
+        <div class="card">
+          <h3>Live metrics</h3>
+          <div id="metrics" class="metrics"></div>
+        </div>
+        <div class="card">
+          <h3>Generations (click a row to inspect memory)</h3>
+          <div id="generations" class="generations"></div>
+        </div>
+      </div>
+      <div class="card">
+        <h3>Evolutionary lineage</h3>
+        <pre id="lineage" class="lineage">—</pre>
+      </div>
+      <div class="card">
+        <h3>Live log</h3>
+        <pre id="live-log" class="log"></pre>
+      </div>
+    </section>
+
+    <section id="compare-panel" class="hidden">
+      <div class="section-head"><h2>Side-by-side comparison</h2></div>
+      <div class="compare-selects">
+        <select id="cmp-a"></select>
+        <select id="cmp-b"></select>
+        <button id="btn-compare" class="btn">Compare</button>
+      </div>
+      <div id="compare-result"></div>
+    </section>
+
+    <section id="shell-panel">
+      <div class="section-head"><h2>Shell — inspect experiments conversationally</h2></div>
+      <div class="card">
+        <div id="shell-log" class="shell-log"></div>
+        <div class="shell-input-row">
+          <input id="shell-input" type="text" placeholder="e.g. What is the status of my experiments? Why did generation 2 fail?">
+          <button id="btn-shell" class="btn">Send</button>
+        </div>
+        <div class="subtle small">
+          Shell model is configured independently (<span id="shell-model">…</span>) · read-only in M1 — control actions are given as API calls.
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="create-dialog">
+    <form id="create-form" method="dialog">
+      <h2>New experiment <span id="create-slot-label" class="subtle"></span></h2>
+      <label>Name <input name="name" required placeholder="paper_review-exp01"></label>
+      <label>Meta-agent model
+        <select name="meta_model" id="sel-meta"></select>
+      </label>
+      <label>Task-agent model
+        <select name="task_model" id="sel-task"></select>
+      </label>
+      <div class="row">
+        <label>Max generations <input name="max_generation" type="number" value="10" min="1" max="500"></label>
+        <label>Parent selection
+          <select name="parent_selection">
+            <option>score_child_prop</option><option>score_prop</option><option>best</option><option>latest</option><option>random</option>
+          </select>
+        </label>
+      </div>
+      <div class="row">
+        <label>Budget max cost ($) <input name="max_cost_usd" type="number" step="0.01" placeholder="unlimited"></label>
+        <label>Budget max tokens <input name="max_tokens" type="number" placeholder="unlimited"></label>
+      </div>
+      <div class="row">
+        <label>Max wallclock (h) <input name="max_wallclock_hours" type="number" step="0.1" placeholder="unlimited"></label>
+        <label>Loop mode (tests only)
+          <select name="loop"><option value="generate">generate (real, needs Docker + seeding)</option><option value="stub">stub (offline, no API cost)</option></select>
+        </label>
+      </div>
+      <p class="subtle small">Domains: paper_review (M1). Budgets are enforced server-side by the LLM proxy kill-switch.</p>
+      <div class="dialog-actions">
+        <button type="button" class="btn ghost" onclick="document.getElementById('create-dialog').close()">Cancel</button>
+        <button type="submit" class="btn primary">Create</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="gen-dialog">
+    <h2 id="gen-dialog-title">Generation</h2>
+    <div id="gen-dialog-body" class="gen-body"></div>
+    <div class="dialog-actions">
+      <button type="button" class="btn" onclick="document.getElementById('gen-dialog').close()">Close</button>
+    </div>
+  </dialog>
+
+  <dialog id="edit-dialog">
+    <form id="edit-form" method="dialog">
+      <h2>Edit experiment <span id="edit-exp-label" class="subtle"></span></h2>
+      <label>Meta-agent model <select name="meta_model" id="edit-sel-meta"></select></label>
+      <label>Task-agent model <select name="task_model" id="edit-sel-task"></select></label>
+      <div class="row">
+        <label>Max generations <input name="max_generation" type="number" min="1" max="500"></label>
+        <label>Budget max cost ($) <input name="max_cost_usd" type="number" step="0.01" placeholder="unlimited"></label>
+      </div>
+      <div class="row">
+        <label>Budget max tokens <input name="max_tokens" type="number" placeholder="unlimited"></label>
+        <label>Max wallclock (h) <input name="max_wallclock_hours" type="number" step="0.1" placeholder="unlimited"></label>
+      </div>
+      <p class="subtle small">Editing is only possible while the experiment is not running. Model changes take effect on next start/resume.</p>
+      <div class="dialog-actions">
+        <button type="button" class="btn ghost" onclick="document.getElementById('edit-dialog').close()">Cancel</button>
+        <button type="submit" class="btn primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

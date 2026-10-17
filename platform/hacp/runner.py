@@ -128,6 +128,8 @@ class ExperimentRunner:
             "HACP_USAGE_LOG": paths.usage_log_relpath(),
             "HACP_META_REASONING": cfg.meta_reasoning_effort or "",
             "HACP_TASK_REASONING": cfg.task_reasoning_effort or "",
+            "HACP_META_COMPLETION": str(cfg.meta_completion_cap or ""),
+            "HACP_TASK_COMPLETION": str(cfg.task_completion_cap or ""),
             "HACP_ROUTING_ACTIVE": "1",
         }
 

@@ -72,6 +72,8 @@ _HACP_ENV_KEYS = {
     "usage_log": "HACP_USAGE_LOG",
     "meta_reasoning": "HACP_META_REASONING",
     "task_reasoning": "HACP_TASK_REASONING",
+    "meta_completion": "HACP_META_COMPLETION",
+    "task_completion": "HACP_TASK_COMPLETION",
 }
 
 
@@ -162,6 +164,16 @@ def _hacp_before_completion(model):
         _effort = _cfg.get("%s_reasoning" % _role)
         if _effort:
             _extra["reasoning_effort"] = _effort
+        _cap = _cfg.get("%s_completion" % _role)
+        try:
+            _cap = int(_cap) if _cap not in (None, "", 0) else None
+        except Exception:
+            _cap = None
+        if _cap and _cap > 0:
+            # raise the completion cap for reasoning models that would
+            # otherwise burn upstream's default 16384 on reasoning and return
+            # content=None (truncated)
+            _extra["max_tokens"] = _cap
         return "openai/" + _override, _extra
     except Exception:
         return None, {}
@@ -219,6 +231,12 @@ ANCHOR_CALL = """    response = litellm.completion(**completion_kwargs)
     response_text = response['choices'][0]['message']['content']  # pyright: ignore
 """
 
+# Anchor 2b: upstream appends the RAW message content (not response_text) to
+# the history — a content=None truncation would leak None into chat histories
+# and crash downstream JSON extraction (observed in run-2 seeding).
+ANCHOR_APPEND = """    new_msg_history.append({"role": "assistant", "content": response['choices'][0]['message']['content']})
+"""
+
 PATCHED_CALL = """    _hacp_model, _hacp_extra = _hacp_before_completion(model)
     if _hacp_model:
         model = _hacp_model
@@ -228,7 +246,15 @@ PATCHED_CALL = """    _hacp_model, _hacp_extra = _hacp_before_completion(model)
     response = litellm.completion(**completion_kwargs)
     _hacp_latency = _hacp_time.monotonic() - _hacp_t0
     response_text = response['choices'][0]['message']['content']  # pyright: ignore
+    if response_text is None:
+        # ==== HACP-PLATFORM-INSTRUMENTATION-v1: reasoning models (e.g.
+        # DeepSeek v4.1 Flash) return content=None when the completion cap
+        # truncates reasoning; upstream would crash on it. Treat as empty.
+        response_text = ""
     _hacp_log_usage(model, response, _hacp_latency)
+"""
+
+PATCHED_APPEND = """    new_msg_history.append({"role": "assistant", "content": response_text})  # ==== HACP-PLATFORM-INSTRUMENTATION-v1 sanitized (content=None truncations stay empty) ==== 
 """
 
 
@@ -283,10 +309,10 @@ def apply_instrumentation(workspace: Path) -> dict:
     }
 
     if MARKER in src:
-        if ANCHOR_CALL in src:
-            # already-patched file should NOT contain the original anchor
+        if ANCHOR_CALL in src or ANCHOR_APPEND in src:
+            # already-patched file should NOT contain the original anchors
             raise InstrumentationError(
-                "file contains both marker and original anchor; refusing to patch"
+                "file contains both marker and original anchor(s); refusing to patch"
             )
         manifest["already_patched"] = True
         manifest["patched"] = True
@@ -303,9 +329,15 @@ def apply_instrumentation(workspace: Path) -> dict:
             f"expected exactly 1 completion anchor, found {src.count(ANCHOR_CALL)}. "
             "Upstream agent/llm.py changed; update platform/hacp/instrumentation.py anchors."
         )
+    if src.count(ANCHOR_APPEND) != 1:
+        raise InstrumentationError(
+            f"expected exactly 1 history-append anchor, found {src.count(ANCHOR_APPEND)}. "
+            "Upstream agent/llm.py changed; update platform/hacp/instrumentation.py anchors."
+        )
 
     patched = src.replace(ANCHOR_MODULE, ANCHOR_MODULE + MODULE_BLOCK, 1)
     patched = patched.replace(ANCHOR_CALL, PATCHED_CALL, 1)
+    patched = patched.replace(ANCHOR_APPEND, PATCHED_APPEND.rstrip() + "\n", 1)
 
     llm_path.write_text(patched)
     manifest["patched"] = True
@@ -358,9 +390,11 @@ def verify_instrumentation(workspace: Path) -> bool:
     return (
         MARKER in src
         and ANCHOR_CALL not in src
+        and ANCHOR_APPEND not in src
         and "_hacp_before_completion" in src
         and "_hacp_routing_active" in src
         and "_HACP_ENV_KEYS" in src
+        and "response_text is None" in src  # content=None sanitization present
     )
 
 

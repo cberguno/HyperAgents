@@ -186,6 +186,10 @@ def create_app(service: ServiceConfig | None = None) -> FastAPI:
             pcfg = json.loads(cfg_path.read_text())
             pcfg["meta_model"] = merged["meta_model"]
             pcfg["task_model"] = merged["task_model"]
+            pcfg["meta_reasoning"] = merged.get("meta_reasoning_effort")
+            pcfg["task_reasoning"] = merged.get("task_reasoning_effort")
+            pcfg["meta_completion"] = merged.get("meta_completion_cap")
+            pcfg["task_completion"] = merged.get("task_completion_cap")
             cfg_path.write_text(json.dumps(pcfg, indent=2))
         store.set_config(exp_id, merged)
         return store.get_experiment(exp_id)

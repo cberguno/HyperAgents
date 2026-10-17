@@ -139,6 +139,8 @@ def prepare_workspace(
         "usage_log": paths.usage_log_relpath(),
         "meta_reasoning": getattr(config, "meta_reasoning_effort", None),
         "task_reasoning": getattr(config, "task_reasoning_effort", None),
+        "meta_completion": getattr(config, "meta_completion_cap", None),
+        "task_completion": getattr(config, "task_completion_cap", None),
     }
     (hacp_dir / "platform_config.json").write_text(json.dumps(platform_config, indent=2))
     (ws / "platform_config.json").write_text(json.dumps(platform_config, indent=2))

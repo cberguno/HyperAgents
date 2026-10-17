@@ -217,6 +217,11 @@ class ExperimentConfig(BaseModel):
     task_reasoning_effort: Optional[str] = Field(
         default=None, pattern="^(minimal|low|medium|high|max)$"
     )
+    # Per-role completion-token cap override. Reasoning models (e.g.
+    # DeepSeek v4.1 Flash) can burn upstream's fixed 16384 completion cap on
+    # reasoning and return content=None; raising the cap lets them finish.
+    meta_completion_cap: Optional[int] = Field(default=None, ge=1, le=262144)
+    task_completion_cap: Optional[int] = Field(default=None, ge=1, le=262144)
     # Platform-injected operator guidance appended to the meta-agent
     # instruction (see hacp/instrumentation.py META_HINT): diagnoses empty
     # prediction distributions as a task_agent.py parsing problem and points

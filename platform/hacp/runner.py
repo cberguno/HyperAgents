@@ -38,6 +38,44 @@ STOP_STATUSES = {"stopped", "paused", "paused_budget", "finished", "failed"}
 # --resume_from semantics) — e.g. after raising max_generation.
 STARTABLE = {"created", "paused", "stopped", "paused_budget", "failed", "finished"}
 
+# Pre-session routing probe executed inside every generation container before
+# the generation's work is trusted (see _guard_containers). Exit codes:
+#   0 -> routing active (instrumented + env-based config + proxy reachable)
+#   3 -> routing NOT active (agent de-instrumented its lineage, or no env)
+ROUTING_PROBE = '''
+import os, sys, urllib.request
+sys.path.insert(0, "/hyperagents")
+try:
+    from agent import llm as L
+except Exception as e:
+    print("HACP-NO-LLM %s" % e); sys.exit(3)
+f = getattr(L, "_hacp_before_completion", None)
+if f is None:
+    print("HACP-NO-PATCH"); sys.exit(3)
+if not L._hacp_routing_active():
+    print("HACP-INACTIVE"); sys.exit(3)
+base = os.environ.get("HACP_LLMBASE", "").rsplit("/proxy/v1", 1)[0]
+if not base:
+    print("HACP-NO-ENV"); sys.exit(3)
+try:
+    urllib.request.urlopen(base + "/api/health", timeout=8).read()
+except Exception as e:
+    print("HACP-UNREACHABLE %s" % e); sys.exit(3)
+print("HACP-OK"); sys.exit(0)
+'''
+
+
+def build_probe_command() -> list:
+    return ["python", "-c", ROUTING_PROBE]
+
+
+def evaluate_routing_probe(exit_code, output="") -> tuple:
+    """(ok, detail) for a probe result."""
+    text = (output or "").decode("utf-8", "replace") if isinstance(output, bytes) else (output or "")
+    ok = exit_code == 0 and "HACP-OK" in text
+    detail = (text.strip().splitlines() or [""])[-1] if text.strip() else f"exit {exit_code}"
+    return ok, f"exit={exit_code} {detail[:160]}"
+
 
 class RunnerError(RuntimeError):
     pass
@@ -53,6 +91,8 @@ class ExperimentRunner:
         self._watchers: dict[str, "object"] = {}
         self._supervisors: dict[str, threading.Thread] = {}
         self._stop_targets: dict[str, str] = {}
+        self._docker_proxies: dict[str, "object"] = {}
+        self._guards: dict[str, threading.Thread] = {}
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------------ helpers
@@ -69,6 +109,27 @@ class ExperimentRunner:
         env["PYTHONUNBUFFERED"] = "1"
         env["MPLBACKEND"] = "Agg"  # headless matplotlib for upstream analysis plots
         return env
+
+    def _container_env(self, exp_id: str, cfg: ExperimentConfig) -> dict:
+        """HACP_* environment injected into every container the run creates
+        (via the Docker socket proxy) and also set for host-side subprocesses.
+
+        Env vars cannot be removed by file operations inside the container —
+        this is the channel that survives an agent deleting
+        platform_config.json (run e6e3168d3b3ca gen 2 did exactly that).
+        """
+        return {
+            "HACP_EXPERIMENT_ID": exp_id,
+            "HACP_LLMBASE": self.service.proxy_v1_base,
+            "HACP_META_MODEL": cfg.meta_model,
+            "HACP_TASK_MODEL": cfg.task_model,
+            "HACP_META_TOKEN": f"hacp-{exp_id}-meta",
+            "HACP_TASK_TOKEN": f"hacp-{exp_id}-task",
+            "HACP_USAGE_LOG": paths.usage_log_relpath(),
+            "HACP_META_REASONING": cfg.meta_reasoning_effort or "",
+            "HACP_TASK_REASONING": cfg.task_reasoning_effort or "",
+            "HACP_ROUTING_ACTIVE": "1",
+        }
 
     def _workspace(self, exp_id: str) -> Path:
         return paths.workspace_dir(exp_id, self.home)
@@ -127,6 +188,13 @@ class ExperimentRunner:
             if not verify_instrumentation(ws):
                 raise RunnerError("workspace exists but is not instrumented")
 
+        # 1b. Ensure the meta-agent guidance hint matches the config
+        # (idempotent; no-op when already applied)
+        if cfg.meta_hint:
+            from .instrumentation import apply_meta_hint
+
+            apply_meta_hint(ws)
+
         # 2. Resume bookkeeping
         run_id = exp.get("run_id") or self._new_run_id()
         resume_from = None
@@ -146,6 +214,10 @@ class ExperimentRunner:
         # 3. Build the subprocess command (unmodified upstream entry point)
         env = self._subprocess_env()
         env["HACP_PLATFORM_CONFIG"] = str(ws / paths.platform_config_relpath())
+        # Belt and braces: env-based routing for host-side subprocesses too
+        # (immune to the agent deleting config files in the workspace).
+        hacp_env = self._container_env(exp_id, cfg)
+        env.update(hacp_env)
         if cfg.seed is not None:
             env.setdefault("PYTHONHASHSEED", str(cfg.seed))
 
@@ -175,6 +247,32 @@ class ExperimentRunner:
             args = cfg.generate_loop_args(run_id, resume_from)
             cmd = [sys.executable] + args  # e.g. generate_loop.py --domains ...
             self.bus.publish(exp_id, "command", {"cmd": " ".join(shlex.quote(c) for c in cmd)})
+
+            # Option C: Docker socket proxy + sitecustomize shim — every
+            # container upstream creates for this run (gl-/nextparent-/ens-)
+            # gets the HACP_* env injected, which no file operation inside the
+            # container can remove. Delivery: docker-py's zero-argument
+            # DockerClient() ignores DOCKER_HOST, so the shim (on PYTHONPATH)
+            # redirects the no-arg construction to the proxy socket.
+            from .docker_proxy import DockerEnvProxy
+
+            proxy = DockerEnvProxy(
+                env=hacp_env,
+                socket_dir=str(self._exp_dir(exp_id)),
+            )
+            sock_path = proxy.start()
+            with self._lock:
+                self._docker_proxies[exp_id] = proxy
+            shim_dir = str(Path(__file__).resolve().parent / "docker_shim")
+            env["PYTHONPATH"] = (
+                shim_dir + os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else shim_dir
+            )
+            env["HACP_DOCKER_PROXY_URL"] = f"unix://{sock_path}"
+            env["DOCKER_HOST"] = f"unix://{sock_path}"  # for any from_env() caller
+            self.bus.publish(
+                exp_id, "docker_proxy_started",
+                {"socket": sock_path, "injected_keys": sorted(hacp_env)},
+            )
 
         # 4. Launch
         exp_dir = self._exp_dir(exp_id)
@@ -222,10 +320,22 @@ class ExperimentRunner:
         sup.start()
         with self._lock:
             self._supervisors[exp_id] = sup
+
+        # Option C: pre-session container guard — verify proxy routing is
+        # active inside every container this run creates; fail the run if not.
+        if cfg.loop != "stub":
+            guard = threading.Thread(
+                target=self._guard_containers,
+                args=(exp_id, run_id, proc), daemon=True,
+                name=f"hacp-guard-{exp_id}",
+            )
+            guard.start()
+            with self._lock:
+                self._guards[exp_id] = guard
         return self.store.get_experiment(exp_id)
 
     def stop(self, exp_id: str, new_status: str = "stopped", reason: Optional[str] = None) -> dict:
-        if new_status not in {"stopped", "paused", "paused_budget"}:
+        if new_status not in {"stopped", "paused", "paused_budget", "failed"}:
             raise RunnerError(f"invalid stop status '{new_status}'")
         exp = self._exp(exp_id)
         proc = self._procs.get(exp_id)
@@ -297,6 +407,10 @@ class ExperimentRunner:
 
         env = self._subprocess_env()
         env["HACP_PLATFORM_CONFIG"] = str(ws / paths.platform_config_relpath())
+        # env-based routing for host-side seed subprocesses as well (immune
+        # to any file tampering in the workspace)
+        exp_cfg = ExperimentConfig(**{k: v for k, v in exp["config"].items() if k in ExperimentConfig.model_fields})
+        env.update(self._container_env(exp_id, exp_cfg))
 
         steps = [
             [sys.executable, "-m", "domains.paper_review.curate_subsets"],
@@ -382,6 +496,13 @@ class ExperimentRunner:
                 if self._watchers.get(exp_id) is watcher:
                     self._watchers.pop(exp_id, None)
                 self._supervisors.pop(exp_id, None)
+                self._guards.pop(exp_id, None)
+                proxy = self._docker_proxies.pop(exp_id, None)
+            if proxy is not None:
+                try:
+                    proxy.stop()
+                except Exception:
+                    pass
             proc_rc = proc.poll()
             exp = self.store.get_experiment(exp_id)
             if exp is None:
@@ -425,6 +546,63 @@ class ExperimentRunner:
         self.store.update_experiment(
             exp_id, status=status, finished_at=time.time(), error=reason
         )
+
+    # ------------------------------------------------------------------ container guard (Option C)
+    def _guard_containers(self, exp_id: str, run_id: str, proc: subprocess.Popen,
+                          poll_interval: float = 5.0):
+        """Watch for containers created for this run (via the REAL docker
+        socket, not the proxy) and pre-session-check each one: routing must be
+        active inside the container before its generation's work is trusted.
+        On failure the run is failed immediately with a clear reason."""
+        try:
+            import docker
+
+            client = docker.DockerClient()  # real daemon; guard must not depend on the proxy
+        except Exception as e:
+            self.bus.publish(exp_id, "routing_check_error", {"error": f"guard cannot reach docker: {e}"})
+            return
+        seen: set[str] = set()
+        while proc.poll() is None:
+            try:
+                containers = client.containers.list(all=True)
+            except Exception:
+                time.sleep(poll_interval)
+                continue
+            for c in containers:
+                name = c.name or ""
+                if run_id not in name or c.id in seen:
+                    continue
+                seen.add(c.id)
+                # wait for the container to actually run before probing
+                deadline = time.time() + 30
+                while time.time() < deadline and c.status != "running" and proc.poll() is None:
+                    time.sleep(1.0)
+                    try:
+                        c.reload()
+                    except Exception:
+                        break
+                if proc.poll() is not None:
+                    return
+                ok, detail = self._guard_once(exp_id, c)
+                if not ok:
+                    try:
+                        self.stop(exp_id, new_status="failed",
+                                  reason=f"pre-session routing check failed in container {name}: {detail}")
+                    except Exception:
+                        pass
+                    return
+            time.sleep(poll_interval)
+
+    def _guard_once(self, exp_id: str, container) -> tuple:
+        """Run the routing probe inside one container. Returns (ok, detail)."""
+        try:
+            result = container.exec_run(build_probe_command(), workdir="/hyperagents")
+            ok, detail = evaluate_routing_probe(result.exit_code, result.output)
+        except Exception as e:
+            ok, detail = False, f"probe execution error: {e}"
+        self.bus.publish(exp_id, "routing_check" if ok else "routing_check_failed",
+                         {"container": container.name, "ok": ok, "detail": detail})
+        return ok, detail
 
     def _cleanup_docker(self, run_id: Optional[str]):
         """Best-effort removal of containers upstream names for this run

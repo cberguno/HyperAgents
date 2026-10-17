@@ -41,6 +41,13 @@ def test_stub_models_are_free():
     assert estimate_cost("stub/tiny", 10**9, 10**9) == 0.0
 
 
+def test_gpt6_luna_pricing_matches_openrouter():
+    # OpenRouter /models 2026-10-16: $0.10/M in, $0.50/M out
+    cost = estimate_cost("openai/gpt-6-luna", 1_000_000, 1_000_000)
+    assert cost == pytest.approx(0.60)
+    assert resolve_model("openai/gpt-6-luna").known_pricing is True
+
+
 def test_catalog_shape():
     cat = model_catalog()
     assert any(m["id"] == "openai/gpt-4o-mini" for m in cat)

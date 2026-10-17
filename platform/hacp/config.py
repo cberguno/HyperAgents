@@ -54,6 +54,9 @@ _PRICING: dict[str, tuple[str, float, float, str]] = {
     "z-ai/glm-5.3": ("z-ai", 0.00, 5.00, "GLM 5.3"),
     # --- DeepSeek — prices from OpenRouter /models (2026-10-16) ---
     "deepseek/deepseek-v4.1-flash": ("deepseek", 0.00, 1.00, "DeepSeek v4.1 Flash"),
+    # --- OpenAI GPT-6 Luna — price from OpenRouter /models (2026-10-16) ---
+    "openai/gpt-6-luna": ("openai", 0.10, 0.50, "GPT-6 Luna"),
+    "openai/gpt-6-luna-pro": ("openai", 0.10, 0.50, "GPT-6 Luna Pro"),
     # --- Offline stub (never billed) ---
     "stub/tiny": ("stub", 0.0, 0.0, "Offline stub model (no cost)"),
     "stub/task": ("stub", 0.0, 0.0, "Offline stub model (no cost)"),
@@ -206,6 +209,19 @@ class ExperimentConfig(BaseModel):
     eval_samples: list[int] = Field(default_factory=list, description="-1 per domain if empty")
     eval_workers: int = Field(default=10, ge=1, le=64)
     eval_test: bool = False
+    # Reasoning effort forwarded to the provider per role (e.g. GPT-6 Luna at
+    # 'max'); None = provider default.
+    meta_reasoning_effort: Optional[str] = Field(
+        default=None, pattern="^(minimal|low|medium|high|max)$"
+    )
+    task_reasoning_effort: Optional[str] = Field(
+        default=None, pattern="^(minimal|low|medium|high|max)$"
+    )
+    # Platform-injected operator guidance appended to the meta-agent
+    # instruction (see hacp/instrumentation.py META_HINT): diagnoses empty
+    # prediction distributions as a task_agent.py parsing problem and points
+    # at the DGM-H two-stage evaluation structure.
+    meta_hint: bool = False
     budget: BudgetConfig = Field(default_factory=BudgetConfig)
     seed: Optional[int] = None
     notes: str = ""

@@ -30,7 +30,12 @@ from pathlib import Path
 
 from . import paths
 from .config import ExperimentConfig, ServiceConfig
-from .instrumentation import apply_instrumentation, verify_instrumentation
+from .instrumentation import (
+    apply_instrumentation,
+    apply_meta_hint,
+    verify_instrumentation,
+    verify_meta_hint,
+)
 
 # Exclusions for copying the pristine repo into an experiment workspace.
 # CRITICAL (regression-tested): these apply at the TOP LEVEL of the repo only
@@ -110,6 +115,11 @@ def prepare_workspace(
     # 2. Apply the instrumentation patch to the copy.
     patch_manifest = apply_instrumentation(ws)
 
+    # 2b. Optional: platform guidance for the meta-agent (per experiment).
+    hint_manifest = None
+    if getattr(config, "meta_hint", False):
+        hint_manifest = apply_meta_hint(ws)
+
     # 3. Platform config: per-role model overrides + proxy routing + usage log.
     #    Written BOTH at the workspace root and under misc/hacp/: upstream
     #    setup_initial_gen excludes 'misc' when creating the evolvable agent
@@ -127,6 +137,8 @@ def prepare_workspace(
         "meta_token": f"hacp-{exp_id}-meta",
         "task_token": f"hacp-{exp_id}-task",
         "usage_log": paths.usage_log_relpath(),
+        "meta_reasoning": getattr(config, "meta_reasoning_effort", None),
+        "task_reasoning": getattr(config, "task_reasoning_effort", None),
     }
     (hacp_dir / "platform_config.json").write_text(json.dumps(platform_config, indent=2))
     (ws / "platform_config.json").write_text(json.dumps(platform_config, indent=2))
@@ -150,6 +162,7 @@ def prepare_workspace(
         "upstream_repo": str(upstream),
         "upstream_commit": upstream_commit,
         "instrumentation": patch_manifest,
+        "meta_hint": hint_manifest,
         "platform_config": platform_config,
         "created_at": __import__("time").time(),
     }

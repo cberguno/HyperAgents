@@ -2,53 +2,16 @@ name: Weekly isolation adversarial check
 on:
   push:
     branches: [task/weekly-trading-handoff]
-    paths: ['.github/workflows/weekly-isolation-check.yml', 'domains/weekly_trading/isolation_probe.py']
+    paths: ['.github/workflows/weekly-isolation-check.yml', 'domains/weekly_trading/isolation_probe.py', 'domains/weekly_trading/isolation-check.sh']
   workflow_dispatch:
 permissions: {}
 jobs:
   hostile-candidate:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
-      - name: Test hostile code in constrained container
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/input" "$RUNNER_TEMP/output" "$RUNNER_TEMP/host-canary" "$RUNNER_TEMP/score-data"
-          printf '%s' 'synthetic secret canary' > "$RUNNER_TEMP/host-canary/secret"
-          printf '%s' 'synthetic score canary' > "$RUNNER_TEMP/score-data/canary"
-          cp domains/weekly_trading/isolation_probe.py "$RUNNER_TEMP/input/program.py"
-          printf '%s' '{"series":[[],[]]}' > "$RUNNER_TEMP/input/package.json"
-          chmod -R a+rX "$RUNNER_TEMP/input"
-          docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --pids-limit 32 --memory 128m --cpus 1 --user 65534:65534 --tmpfs /tmp:rw,noexec,nosuid,nodev,size=4m -v "$RUNNER_TEMP/input:/input:ro" python:3.12-alpine timeout 15 python -I /input/program.py > "$RUNNER_TEMP/output/selection.json"
-          python3 - "$RUNNER_TEMP/output/selection.json" <<'PY'
-          import json, sys
-          a=json.load(open(sys.argv[1]))
-          assert isinstance(a,list) and len(a)==len(set(a)) and all(type(x) is int and 0<=x<2 for x in a)
-          PY
-      - uses: actions/upload-artifact@v4
-        with:
-          name: synthetic-validated-selection
-          path: ${{ runner.temp }}/output/selection.json
-          if-no-files-found: error
-          retention-days: 1
-  trusted-score:
-    needs: hostile-candidate
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: synthetic-validated-selection
-          path: selection
-      - name: Validate untrusted artifact without executing it
-        run: |
-          python3 - <<'PY'
-          import json
-          with open('selection/selection.json') as f: a=json.load(f)
-          assert isinstance(a,list) and len(a)==len(set(a)) and all(type(x) is int and 0<=x<2 for x in a)
-          print('UNSCORED security plumbing test; no model, no data, no trading score')
-          PY
+      - name: Compare constrained candidate to hostile negative control
+        run: bash domains/weekly_trading/isolation-check.sh

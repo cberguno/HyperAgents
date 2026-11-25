@@ -15,6 +15,6 @@ try:socket.create_connection(('1.1.1.1',443),timeout=2);raise AssertionError('ou
 except OSError:pass
 try:socket.getaddrinfo('github.com',443);raise AssertionError('DNS available')
 except socket.gaierror:pass
-assert not subprocess.run(['git','-C','/scratch','remote'],capture_output=True,text=True,check=True).stdout.strip()
+assert not subprocess.run(['git','-c','safe.directory=/scratch','-C','/scratch','remote'],capture_output=True,text=True,check=True).stdout.strip()
 open('/scratch/changed','w').write('scratch works')
 print('socket route checks passed; key env, listed files, socket, DNS, TCP absent; scratch writable and no remote')

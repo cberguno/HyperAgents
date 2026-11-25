@@ -1,0 +1,16 @@
+name: Weekly socket topology synthetic test
+on:
+  push:
+    branches: [task/weekly-trading-handoff]
+    paths: ['.github/workflows/weekly-socket-check.yml','domains/weekly_trading/socket_test/**']
+  workflow_dispatch:
+permissions: {}
+jobs:
+  socket-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - run: bash domains/weekly_trading/socket_test/test.sh
